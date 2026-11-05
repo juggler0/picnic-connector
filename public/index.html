@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Picnic-connector</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --accent:#2f7d4f; --err:#b3261e; --border:#dedbd3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --card:#222220; --text:#eeede9; --muted:#a5a49e; --accent:#5cb983; --err:#f2827a; --border:#3a3936; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:440px; margin:40px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:22px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.lead { color:var(--muted); margin:0 0 18px; font-size:.95rem; }
+  label { display:block; font-size:.85rem; color:var(--muted); margin:14px 0 4px; }
+  input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:transparent; color:var(--text); font:inherit; }
+  button { margin-top:16px; padding:10px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--text); border:1px solid var(--border); margin-right:8px; }
+  .row { display:flex; flex-wrap:wrap; }
+  #msg { margin-top:16px; font-size:.95rem; min-height:1.5em; }
+  #msg.err { color:var(--err); }
+  .hidden { display:none; }
+  .note { color:var(--muted); font-size:.82rem; margin-top:18px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Picnic-connector</h1>
+    <p class="lead">Eenmalig inloggen bij Picnic, zodat Claude je winkelmand kan vullen. Je wachtwoord wordt alleen doorgegeven aan Picnic en niet bewaard.</p>
+
+    <label for="secret">Connector-sleutel</label>
+    <input id="secret" type="password" autocomplete="off">
+
+    <div class="row">
+      <button class="secondary" type="button" onclick="send('status')">Status</button>
+      <button class="secondary" type="button" onclick="send('check')">Test verbinding met Picnic</button>
+      <button class="secondary" type="button" onclick="send('history')">Voortgang bestelgeschiedenis</button>
+    </div>
+
+    <form id="loginForm" onsubmit="event.preventDefault(); send('login')">
+      <label for="email">Picnic e-mail</label>
+      <input id="email" type="email" autocomplete="username">
+      <label for="password">Picnic wachtwoord</label>
+      <input id="password" type="password" autocomplete="current-password">
+      <button type="submit">Inloggen</button>
+    </form>
+
+    <form id="codeForm" class="hidden" onsubmit="event.preventDefault(); send('verify')">
+      <label for="code">Sms-code van Picnic</label>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code">
+      <button type="submit">Bevestigen</button>
+    </form>
+
+    <div id="msg" role="status"></div>
+    <div class="row"><button class="secondary" type="button" onclick="send('logout')">Uitloggen</button></div>
+    <p class="note">Bestellen kan via deze connector niet — dat doe je zelf in de Picnic-app.</p>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function show(text, isErr) { const m = $('msg'); m.textContent = text; m.className = isErr ? 'err' : ''; }
+  async function send(action) {
+    const body = { action, secret: $('secret').value };
+    if (action === 'login') { body.email = $('email').value; body.password = $('password').value; }
+    if (action === 'verify') body.code = $('code').value;
+    show('Bezig…');
+    try {
+      const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({ error: 'Onverwacht antwoord (' + r.status + ')' }));
+      if (d.error) return show(d.error, true);
+      if (action === 'login') $('password').value = '';
+      if (d.needs2fa) { $('codeForm').classList.remove('hidden'); return show(d.message); }
+      if (action === 'check') return show(d.detail, !d.reachable);
+      if (action === 'history') return show(d.history);
+      if (d.loggedIn) { $('codeForm').classList.add('hidden'); return show('Ingelogd' + (d.name ? ' als ' + d.name : '') + ' ✓'); }
+      show('Niet ingelogd.');
+    } catch (e) { show('Verbinding mislukt: ' + e.message, true); }
+  }
+</script>
+</body>
+</html>

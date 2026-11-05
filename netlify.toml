@@ -1,0 +1,17 @@
+[build]
+  publish = "public"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = []
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+    Referrer-Policy = "no-referrer"
+    X-Frame-Options = "DENY"
+
+# Asked for by the "Deploy to Netlify" button
+[template.environment]
+  CONNECTOR_SECRET = "Your secret key: at least 32 random characters (e.g. openssl rand -hex 32). Keep it private."
