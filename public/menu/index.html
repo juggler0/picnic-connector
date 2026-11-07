@@ -77,8 +77,8 @@
   .saved { color: var(--brass); font-size: .9rem; }
   .err { color: var(--danger); font-size: .9rem; }
 
-  .extras { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
-  .extras h3 { font: 400 1.1rem/1.3 var(--serif); text-align: center; margin: 0 0 12px; }
+  .wkc { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .wkc h3 { font: 400 1.1rem/1.3 var(--serif); text-align: center; margin: 0 0 12px; }
 
   .login { max-width: 360px; margin: 12vh auto 0; }
   .login .card { padding: 36px 24px; }
@@ -176,7 +176,7 @@ function render() {
     el("p", { class: "sub" }, future ? "Voorstel — laat weten wat je ervan vindt" : week.days.some((x) => x.date <= S.today) ? "Geef de gerechten een cijfer" : ""),
     el("div", { class: "ornament" }),
     week.days.map((day) => renderDay(week, day, feedback)),
-    renderExtras(week, feedback));
+    renderWeekComment(week, feedback));
   app.replaceChildren(header, tabs, card);
   requestAnimationFrame(() => tabs.querySelector('[aria-pressed="true"]')?.scrollIntoView({ inline: "center", block: "nearest" }));
 }
@@ -249,20 +249,20 @@ function renderEdit(week, day) {
   return panel;
 }
 
-function renderExtras(week, feedback) {
+function renderWeekComment(week, feedback) {
   const firstDay = week.days[0]?.date || week.id;
-  if (firstDay <= S.today) return null; // only for weeks whose groceries still have to be ordered
-  const list = Object.entries(feedback).filter(([p, f]) => f.extras && p !== S.me).map(([p, f]) =>
-    el("li", {}, el("b", {}, p), el("div", { style: "white-space:pre-line" }, f.extras)));
-  const mine = el("textarea", { id: "extras", maxlength: "1000" }, feedback[S.me]?.extras || "");
+  if (firstDay <= S.today) return null; // reactions on the menu as a whole: only for the proposal
+  const list = Object.entries(feedback).filter(([p, f]) => p !== S.me && f.items?.week?.comment).map(([p, f]) =>
+    el("li", {}, el("b", {}, p), el("div", { style: "white-space:pre-line" }, f.items.week.comment)));
+  const mine = el("textarea", { id: "c-week", maxlength: "1000" }, feedback[S.me]?.items?.week?.comment || "");
   const status = el("span", { role: "status" });
-  return el("div", { class: "extras" },
-    el("h3", {}, "Extra boodschappen"),
+  return el("div", { class: "wkc" },
+    el("h3", {}, "Reacties op dit menu"),
     list.length ? el("ul", { class: "others" }, list) : null,
-    el("label", { class: "f", for: "extras" }, "Jouw lijstje"), mine,
+    el("label", { class: "f", for: "c-week" }, "Jouw reactie"), mine,
     el("div", { class: "row" },
       el("button", { class: "btn", onclick: async () => {
-        try { await api("extras", { weekId: week.id, extras: mine.value }); status.className = "saved"; status.textContent = "Opgeslagen"; await load(); }
+        try { await api("feedback", { weekId: week.id, date: "week", comment: mine.value, rating: null }); status.className = "saved"; status.textContent = "Opgeslagen"; await load(); }
         catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
       status));
 }

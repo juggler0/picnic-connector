@@ -3,8 +3,7 @@
  *   POST /api/menu/login     {name, pin}         → sets the session cookie
  *   POST /api/menu/logout
  *   GET  /api/menu/state                         → weeks + everyone's feedback (logged in)
- *   POST /api/menu/feedback  {weekId, date, comment, rating}   → own feedback only
- *   POST /api/menu/extras    {weekId, extras}    → own extra groceries for that week
+ *   POST /api/menu/feedback  {weekId, date, comment, rating}   → own feedback only (date "week" = the whole menu)
  *   POST /api/menu/day       {weekId, day}       → owner only: change a dish / ingredients
  */
 import type { Config, Context } from "@netlify/functions";
@@ -49,11 +48,6 @@ export default async (req: Request, context: Context) => {
       const { weekId, date, comment, rating } = await req.json();
       const f = await M.putOwnFeedback(me, weekId, date, comment, rating);
       return json({ ok: true, feedback: f });
-    }
-
-    if (action === "extras" && req.method === "POST") {
-      const { weekId, extras } = await req.json();
-      return json({ ok: true, feedback: await M.putOwnExtras(me, weekId, extras) });
     }
 
     if (action === "day" && req.method === "POST") {

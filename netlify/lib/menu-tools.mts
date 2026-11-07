@@ -37,7 +37,7 @@ export function registerMenuTools(server: McpServer) {
 
   server.tool(
     "menu_get_week",
-    "Eén week van de gezinsmenu-website met alle dagen en per persoon de feedback, cijfers en extra boodschappen (feedback[naam].extras, één product per regel; neem die mee in de winkelmand). editedBy='owner' betekent dat de eigenaar (Johan) die dag zelf heeft aangepast: dat is leidend. Alleen lezen.",
+    "Eén week van de gezinsmenu-website met alle dagen en per persoon de feedback en cijfers per dag (sleutel 'week' = reactie op het hele menu). Lees alle reacties: vraagt iemand om iets extra's (bijv. 'graag ook aardbeienyoghurt'), neem dat mee in de boodschappen. editedBy='owner' betekent dat de eigenaar (Johan) die dag zelf heeft aangepast: dat is leidend. Alleen lezen.",
     { week_id: weekId },
     async ({ week_id }) => run("menu_get_week", { week_id }, async () => ({
       owner: M.owner(),
@@ -88,7 +88,7 @@ export function registerMenuTools(server: McpServer) {
           for (const [date, item] of Object.entries(f.items)) {
             if (item.updatedAt > from) {
               const day = week?.days.find((d) => d.date === date);
-              out.push({ week: id, date, day: M.dayName(date), dish: day?.dish ?? "", person, rating: item.rating, comment: item.comment, updatedAt: item.updatedAt });
+              out.push({ week: id, date, day: date === "week" ? "hele menu" : M.dayName(date), dish: day?.dish ?? "", person, rating: item.rating, comment: item.comment, updatedAt: item.updatedAt });
             }
           }
         }

@@ -110,7 +110,7 @@ See [`.env.example`](.env.example). After changing a variable: **Deploys → Tri
 ## Optional: family menu website
 
 A small website at `https://<your-project>.netlify.app/menu/` where the family sees the weekly menu, reacts to the
-proposal, rates dishes (1–10 with a comment) and adds extra groceries. Everyone logs in with first name and a PIN —
+proposal (per dish or for the whole menu) and rates dishes (1–10 with a comment). Everyone logs in with first name and a PIN —
 no Claude or Notion account needed. Everyone reads everything but can only change their own feedback; only the owner
 can change dishes and ingredients (marked "aangepast door …", and Claude never overwrites them).
 

@@ -29,7 +29,7 @@ export type Day = {
 };
 export type Week = { id: string; title: string; status: string; days: Day[]; updatedAt: string };
 export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string };
-export type PersonFeedback = { person: string; items: Record<string, FeedbackItem>; extras?: string; extrasUpdatedAt?: string };
+export type PersonFeedback = { person: string; items: Record<string, FeedbackItem> }; // key = date, or "week" for the menu as a whole
 
 const DAY_NAMES = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
 export const dayName = (date: string) => DAY_NAMES[new Date(date + "T12:00:00Z").getUTCDay()];
@@ -169,26 +169,15 @@ export async function getFeedback(weekId: string): Promise<Record<string, Person
 
 /** A person changes only their own feedback for one day. */
 export async function putOwnFeedback(person: string, weekId: string, date: string, comment: unknown, rating: unknown) {
-  if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
+  if (!isDate(weekId) || !(isDate(date) || date === "week")) throw new Error("Ongeldige week of dag");
   const key = `feedback/${weekId}/${person.toLowerCase()}`;
   const f = ((await menuStore().get(key, { type: "json" })) as PersonFeedback | null) ?? { person, items: {} };
   const r = rating === null || rating === "" || rating === undefined ? null : Number(rating);
   if (r !== null && !(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Cijfer moet 1 t/m 10 zijn");
-  if (r !== null && date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
+  if (r !== null && (date === "week" || date > today())) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
   const text = clip(comment, 1000).trim();
   if (!text && r === null) delete f.items[date];
   else f.items[date] = { comment: text, rating: r, updatedAt: new Date().toISOString() };
-  await menuStore().setJSON(key, f);
-  return f;
-}
-
-/** A person changes only their own "extra boodschappen" for a week (free text, one item per line). */
-export async function putOwnExtras(person: string, weekId: string, extras: unknown) {
-  if (!isDate(weekId)) throw new Error("Ongeldige week");
-  const key = `feedback/${weekId}/${person.toLowerCase()}`;
-  const f = ((await menuStore().get(key, { type: "json" })) as PersonFeedback | null) ?? { person, items: {} };
-  f.extras = clip(extras, 1000).trim();
-  f.extrasUpdatedAt = new Date().toISOString();
   await menuStore().setJSON(key, f);
   return f;
 }
