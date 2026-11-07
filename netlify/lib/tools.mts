@@ -93,7 +93,7 @@ export function registerTools(server: McpServer) {
 
   server.tool(
     "picnic_search",
-    "Zoekt producten zoals in de app. boughtBefore=true betekent eerder gekocht (sectie 'Opnieuw bestellen') — kies die bij voorkeur. 'promo' toont een actielabel. Geeft ook Picnic-recepten die bij de zoekterm passen. Alleen lezen.",
+    "Zoekt producten zoals in de app. boughtBefore=true betekent eerder gekocht (sectie 'Opnieuw bestellen'); dat is een hint, geen voorkeur — een A-merk dat eens in de aanbieding is gekocht hoeft niet opnieuw. Vergelijk bij acties de prijs per kilo/liter (unitPrice) met het huismerk. 'promo' toont een actielabel. Geeft ook Picnic-recepten die bij de zoekterm passen. Alleen lezen.",
     {
       query: z.string().min(1).max(100).describe("Zoekterm in het Nederlands, bijv. 'kipfilet'"),
       limit: z.coerce.number().int().min(1).max(20).default(8).describe("Maximaal aantal producten"),

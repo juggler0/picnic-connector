@@ -12,7 +12,7 @@ import { registerTools } from "../lib/tools.mts";
 const INSTRUCTIONS =
   "Persoonlijke Picnic-connector van de gebruiker. Je kunt producten zoeken, aanbiedingen en bestelgeschiedenis bekijken en de winkelmand vullen of aanpassen. " +
   "Bestellen en afrekenen kan hier bewust niet: dat doet de gebruiker zelf in de Picnic-app. Een bezorgmoment kiezen mag wel. " +
-  "Kies bij het zoeken bij voorkeur producten met boughtBefore=true (eerder gekocht).";
+  "Eerder gekochte producten (boughtBefore=true) zijn een hint, geen vaste voorkeur; vergelijk acties per kilo/liter met het huismerk.";
 
 export default async (req: Request, context: Context) => {
   // Wrong or missing key → pretend nothing is here.
