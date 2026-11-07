@@ -5,10 +5,17 @@
  */
 import type { Config } from "@netlify/functions";
 import { runHistorySync } from "../lib/history.mts";
-import { migrationPending, migrateFromBlobs } from "../lib/menu.mts";
+import { migrationPending, migrateFromBlobs, advanceStatuses } from "../lib/menu.mts";
 import { notionConfigured } from "../lib/notion.mts";
 
 export default async () => {
+  // Once a day: menu statuses (besteld from the delivery day, gegeten once the day has passed).
+  try {
+    const t = await advanceStatuses();
+    if (t) console.info("menu status:", t);
+  } catch (err) {
+    console.error("menu status update failed:", err);
+  }
   // One-time: move the family menu that was kept in Blobs into the Notion databases (takes priority).
   if (notionConfigured() && (await migrationPending())) {
     try {

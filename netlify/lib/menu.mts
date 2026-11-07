@@ -133,7 +133,8 @@ type Dbs = Record<DbKey, string> & { schemaFor: string };
 const DB_KEY = "meta/notionDbs";
 const ownerEditProp = () => `Aangepast door ${owner()}`;
 const reactionProp = (person: string) => `Reactie ${person}`;
-export const DAY_STATUS = ["voorstel", "in winkelmand", "gegeten"];
+/** voorstel → in winkelmand (Wednesday, not yet paid) → besteld (from delivery day) → gegeten (day has passed). */
+export const DAY_STATUS = ["voorstel", "in winkelmand", "besteld", "gegeten"];
 export const GROCERY_STATUS = ["gepland", "voorstel", "goedgekeurd", "afgewezen"];
 
 function schema(key: DbKey): Record<string, unknown> {
@@ -322,7 +323,7 @@ export async function loadWeeks(opts: { from?: string; only?: string; groceriesF
           if (wc) items.week = { rating: null, comment: wc, updatedAt: wp.last_edited_time };
           if (Object.keys(items).length) feedback[person] = { person, items };
         }
-        const days = pages.map(toDay).filter((d) => d.date);
+        const days = pages.map(toDay).filter((d) => d.date).sort((a, b) => a.date.localeCompare(b.date));
         return {
           week: {
             id,
@@ -664,7 +665,7 @@ export async function migrateFromBlobs(deadline: number) {
       ratings: Object.fromEntries(fb.filter((f) => f.items[d.date]).map((f) => [f.person, f.items[d.date]])),
     }));
     const weekReactions = Object.fromEntries(fb.filter((f) => f.items.week?.comment).map((f) => [f.person, f.items.week.comment]));
-    const status = w.status === "besteld" ? "in winkelmand" : DAY_STATUS.includes(w.status) ? w.status : undefined;
+    const status = DAY_STATUS.includes(w.status) ? w.status : undefined;
     await putWeekFromClaude({ id, title: w.title, status, days, weekReactions, ownerDays: w.days.filter((d) => d.editedBy === "owner").map((d) => d.date) });
     const g = await getGuestFeedback(id);
     for (const [date, list] of Object.entries(g.items)) {
@@ -677,4 +678,37 @@ export async function migrateFromBlobs(deadline: number) {
   state.finished = true;
   await s.setJSON(MIGRATION_KEY, state);
   return state;
+}
+
+// ---------- daily status update ----------
+const TICK_KEY = "meta/statusTick";
+
+/**
+ * Once a day (called by the scheduled function): days before today become "gegeten"; weeks in the cart become
+ * "besteld" from their delivery day (the Thursday before the week); a week whose days are all past becomes "gegeten".
+ */
+export async function advanceStatuses(): Promise<string | null> {
+  if (!N.notionConfigured()) return null;
+  const t = today();
+  if (((await menuStore().get(TICK_KEY, { type: "text" })) as string | null) === t) return null;
+  return withDbs(async (D) => {
+    let changed = 0;
+    const set = async (id: string, status: string) => { await N.notion("PATCH", `/pages/${id}`, { properties: { Status: N.select(status) } }); changed++; };
+    const days = await queryAll(D.days, { filter: { property: "Status", select: { does_not_equal: "gegeten" } } });
+    for (const p of days) {
+      const date = dateOf(p.properties.Datum);
+      const status = plain(p.properties.Status);
+      if (date && date < t) await set(p.id, "gegeten");
+      else if (status === "in winkelmand" && addDays(dayWeekId(p), -1) <= t) await set(p.id, "besteld");
+    }
+    for (const p of await queryAll(D.weeks, { filter: { property: "Status", select: { does_not_equal: "gegeten" } } })) {
+      const id = plain(p.properties["Week-id"]).trim();
+      if (!isDate(id)) continue;
+      const status = plain(p.properties.Status);
+      if (addDays(id, 6) < t) await set(p.id, "gegeten");
+      else if (status === "in winkelmand" && addDays(id, -1) <= t) await set(p.id, "besteld");
+    }
+    await menuStore().set(TICK_KEY, t);
+    return `${t}: ${changed} statussen bijgewerkt`;
+  });
 }

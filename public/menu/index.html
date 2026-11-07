@@ -217,7 +217,7 @@ function render() {
   const future = W.week.days[0] && W.week.days[0].date > S.today;
   const card = el("section", { class: "card" },
     el("h2", {}, W.week.title),
-    el("p", { class: "sub" }, future ? "Voorstel" : ""),
+    el("p", { class: "sub" }, phase(W.week) === "past" ? "" : cap(W.week.status || (future ? "voorstel" : ""))),
     el("div", { class: "ornament" }),
     S.isGuest && el("p", { class: "quota", style: "margin-top:14px" }, S.guestLeft ? `Je kunt vandaag nog ${S.guestLeft} ${S.guestLeft === 1 ? "cijfer" : "cijfers"} geven` : "Je hebt vandaag je cijfers al gegeven"),
     W.week.days.map((day) => renderDay(W, day)),

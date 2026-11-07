@@ -53,7 +53,7 @@ export function registerMenuTools(server: McpServer) {
     {
       week_id: weekId,
       title: z.string().max(120).optional().describe("Bijv. 'Week 47-48 (vr 20 – do 26 nov)'"),
-      status: z.enum(["voorstel", "in winkelmand", "gegeten"]).optional(),
+      status: z.enum(["voorstel", "in winkelmand", "besteld", "gegeten"]).optional().describe("voorstel (donderdag) → in winkelmand (woensdag, nog niet afgerekend) → besteld en gegeten gaan vanzelf (vanaf de bezorgdag / na de dag)"),
       delivery: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Bezorgdatum (donderdag)"),
       note: z.string().max(2000).optional().describe("Claude-notitie bij de hele week"),
       days: z
