@@ -138,6 +138,11 @@ A scheduled function then creates two databases on that page — **Picnic bestel
 large histories take several hours because Notion allows ~3 changes per second) and afterwards checks every 6 hours for
 new deliveries. Progress: button **Voortgang bestelgeschiedenis** on the login page. Payment details are never copied.
 
+Once the history is complete, a second scheduled function keeps **Picnic prijzen <year>** on the same page: one row
+per product you ever ordered and one column per week (`Wk 46`) with that week's price, plus current price, last week,
+change, lowest/highest this year and the current promotion. It looks up each product once a week (from Monday),
+about 1000 products in roughly an hour and a half, and a new database is started each year.
+
 ---
 
 ## Security model
