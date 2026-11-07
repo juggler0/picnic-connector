@@ -44,6 +44,7 @@ Nothing is shared with the author of this repository or with other users.
 | `picnic_order_history`, `picnic_order_details`, `picnic_purchase_stats` | `picnic_set_delivery_slot` (choosing a slot is not ordering) |
 | `picnic_next_delivery` | |
 | `picnic_saved_recipes`, `picnic_recipe` | |
+| `menu_list_weeks`, `menu_get_week`, `menu_get_new_ratings` | `menu_put_week`, `menu_mark_ratings_processed` |
 
 Deliberately **not** included: checkout, payment and cancelling orders.
 
@@ -101,8 +102,20 @@ Treat this address like a password: anyone who has it can use your cart.
 | `PICNIC_COUNTRY` | no | `NL` (default), `DE` or `FR`. |
 | `ALLOWED_IP_PREFIXES` | no | Comma-separated IP prefixes; when set, only those callers are served (extra safety net). |
 | `NOTION_TOKEN` | no | Enables the order-history copy to Notion (see below). |
+| `MENU_USERS` | no | Family menu website: `Name:PIN` pairs, comma-separated, PIN 4–8 digits. |
+| `MENU_OWNER` | no | Name of the person who may change dishes (default: the first name in `MENU_USERS`). |
 
 See [`.env.example`](.env.example). After changing a variable: **Deploys → Trigger deploy**.
+
+## Optional: family menu website
+
+A small website at `https://<your-project>.netlify.app/menu/` where the family sees the weekly menu, reacts to the
+proposal, rates dishes (1–10 with a comment) and adds extra groceries. Everyone logs in with first name and a PIN —
+no Claude or Notion account needed. Everyone reads everything but can only change their own feedback; only the owner
+can change dishes and ingredients (marked "aangepast door …", and Claude never overwrites them).
+
+Set `MENU_USERS` (e.g. `Anna:4821,Ben:7310`) — the first name is the owner unless `MENU_OWNER` says otherwise.
+Claude reads and writes the website through the `menu_*` tools of the same connector.
 
 ## Optional: order history in Notion
 

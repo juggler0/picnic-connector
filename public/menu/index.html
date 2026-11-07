@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#EDEFEA">
+<title>Ons menu</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --stone: #EDEFEA; --card: #FAFAF7; --ink: #1E2723; --muted: #66706B;
+    --line: #D5D9D2; --brass: #93743A; --brass-soft: #E9E1CF; --danger: #9B2C2C;
+    --serif: "Marcellus", Georgia, serif; --sans: "Albert Sans", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --stone: #141917; --card: #1C2320; --ink: #E7EAE5; --muted: #9AA39E; --line: #2F3934; --brass: #C7A665; --brass-soft: #3A3324; --danger: #E79A9A; }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--stone); color: var(--ink); font: 16px/1.55 var(--sans); }
+  button, input, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+  .wrap { max-width: 600px; margin: 0 auto; padding: 20px 16px 64px; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 4px 4px 16px; }
+  header h1 { font: 400 1.6rem/1.1 var(--serif); margin: 0; letter-spacing: .02em; }
+  .who { color: var(--muted); font-size: .9rem; }
+  .link { background: none; border: 0; padding: 0; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+
+  .weeks { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 14px; scrollbar-width: none; }
+  .weeks button { flex: none; border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 6px 14px; font-size: .9rem; cursor: pointer; color: var(--muted); }
+  .weeks button[aria-pressed="true"] { background: var(--ink); color: var(--card); border-color: var(--ink); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 36px 22px 28px; }
+  .card > h2 { font: 400 1.35rem/1.25 var(--serif); text-align: center; margin: 0 0 4px; }
+  .sub { text-align: center; color: var(--muted); font-size: .88rem; margin: 0 0 26px; }
+  .ornament { width: 36px; height: 1px; background: var(--brass); margin: 0 auto; }
+
+  .day { text-align: center; padding: 22px 0; }
+  .day + .day { border-top: 1px solid var(--line); }
+  .dayname { color: var(--brass); font-size: .88rem; letter-spacing: .03em; }
+  .dish { font: 400 1.4rem/1.3 var(--serif); margin: 4px 0 2px; }
+  .dish.empty { color: var(--muted); font-size: 1.05rem; }
+  .notes { color: var(--muted); font-size: .92rem; margin: 2px 0 0; }
+  .meta { display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: .9rem; }
+  .meta a, .meta button { color: var(--ink); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 4px; }
+  .owner-mark { display: inline-block; font-size: .78rem; color: var(--brass); border: 1px solid var(--brass-soft); border-radius: 999px; padding: 0 8px; margin-top: 6px; }
+
+  .panel { text-align: left; margin: 16px 0 0; padding: 16px; border-radius: 4px; background: var(--stone); }
+  .panel h3 { font: 500 .95rem/1.3 var(--sans); margin: 0 0 8px; }
+  .panel + .panel { margin-top: 10px; }
+  .others { list-style: none; margin: 0 0 14px; padding: 0; }
+  .others li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .95rem; }
+  .others li:last-child { border-bottom: 0; }
+  .others b { font-weight: 600; }
+  .score { display: inline-block; min-width: 1.8em; text-align: center; border-radius: 999px; background: var(--brass-soft); color: var(--ink); font-weight: 600; font-size: .85rem; margin-left: 6px; }
+  .muted { color: var(--muted); }
+  details.ingr { margin-top: 10px; font-size: .92rem; }
+  details.ingr summary { cursor: pointer; color: var(--muted); }
+  details.ingr p { margin: 6px 0 0; white-space: pre-line; }
+
+  label.f { display: block; font-size: .88rem; color: var(--muted); margin: 10px 0 4px; }
+  textarea, input[type=text], input[type=url], input[type=password], input[inputmode] {
+    width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
+  }
+  textarea { min-height: 72px; resize: vertical; }
+  .rating { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+  .rating button { aspect-ratio: 1; border: 1px solid var(--line); background: var(--card); border-radius: 50%; cursor: pointer; font-size: .9rem; padding: 0; }
+  .rating button[aria-pressed="true"] { background: var(--brass); border-color: var(--brass); color: #fff; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .btn { border: 0; background: var(--ink); color: var(--card); border-radius: 4px; padding: 10px 18px; cursor: pointer; font-weight: 500; }
+  .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: .95rem; }
+  .saved { color: var(--brass); font-size: .9rem; }
+  .err { color: var(--danger); font-size: .9rem; }
+
+  .extras { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+  .extras h3 { font: 400 1.1rem/1.3 var(--serif); text-align: center; margin: 0 0 12px; }
+
+  .login { max-width: 360px; margin: 12vh auto 0; }
+  .login .card { padding: 36px 24px; }
+  .login h1 { font: 400 1.9rem/1.1 var(--serif); text-align: center; margin: 0 0 6px; }
+  .login .btn { width: 100%; margin-top: 18px; }
+  .empty-state { text-align: center; color: var(--muted); padding: 30px 0 10px; }
+  @media (prefers-reduced-motion: no-preference) { .panel { animation: open .18s ease-out; } @keyframes open { from { opacity: 0; transform: translateY(-4px); } } }
+</style>
+</head>
+<body>
+<div id="app" class="wrap" aria-live="polite"></div>
+<script>
+const app = document.getElementById("app");
+let S = null;            // state from the server
+let selected = null;     // selected week id
+let open = {};           // which panels are open: { "<date>:fb" | "<date>:edit": true }
+
+const MONTHS = ["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"];
+const DAYS = ["zondag","maandag","dinsdag","woensdag","donderdag","vrijdag","zaterdag"];
+const d = (iso) => new Date(iso + "T12:00:00");
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const longDate = (iso) => `${cap(DAYS[d(iso).getDay()])} ${d(iso).getDate()} ${MONTHS[d(iso).getMonth()]}`;
+const shortRange = (w) => {
+  const a = d(w.days[0]?.date || w.id), b = d(w.days.at(-1)?.date || w.id);
+  return a.getMonth() === b.getMonth()
+    ? `${a.getDate()}–${b.getDate()} ${MONTHS[a.getMonth()].slice(0,3)}`
+    : `${a.getDate()} ${MONTHS[a.getMonth()].slice(0,3)} – ${b.getDate()} ${MONTHS[b.getMonth()].slice(0,3)}`;
+};
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, "");
+    else if (v !== false && v != null) n.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) n.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return n;
+};
+
+async function api(path, body) {
+  const r = await fetch("/api/menu/" + path, body === undefined
+    ? { credentials: "same-origin" }
+    : { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-menu": "1" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || "Er ging iets mis (" + r.status + ")"), { status: r.status });
+  return data;
+}
+
+async function load() {
+  try {
+    S = await api("state");
+    if (!selected || !S.weeks.some((w) => w.week?.id === selected)) selected = S.weeks.at(-1)?.week?.id ?? null;
+    render();
+  } catch (e) {
+    if (e.status === 401) renderLogin();
+    else app.replaceChildren(el("p", { class: "err" }, e.message));
+  }
+}
+
+function renderLogin(msg) {
+  const name = el("input", { type: "text", id: "name", autocomplete: "username", autocapitalize: "words" });
+  const pin = el("input", { type: "password", id: "pin", inputmode: "numeric", autocomplete: "current-password", maxlength: "8" });
+  const error = el("p", { class: "err", role: "alert" }, msg || "");
+  const form = el("form", { onsubmit: async (ev) => {
+      ev.preventDefault();
+      error.textContent = "";
+      try { await api("login", { name: name.value, pin: pin.value }); await load(); }
+      catch (e) { error.textContent = e.message; pin.value = ""; pin.focus(); }
+    } },
+    el("label", { class: "f", for: "name" }, "Voornaam"), name,
+    el("label", { class: "f", for: "pin" }, "Pincode"), pin,
+    el("button", { class: "btn", type: "submit" }, "Inloggen"), error);
+  app.replaceChildren(el("div", { class: "login" }, el("div", { class: "card" },
+    el("h1", {}, "Ons menu"), el("p", { class: "sub" }, "Log in met je voornaam en pincode"), el("div", { class: "ornament" }), form)));
+  name.focus();
+}
+
+function render() {
+  const header = el("header", {},
+    el("h1", {}, "Ons menu"),
+    el("span", { class: "who" }, S.me, "  ", el("button", { class: "link", onclick: async () => { await api("logout", {}); S = null; renderLogin(); } }, "Uitloggen")));
+
+  if (!S.weeks.length) {
+    app.replaceChildren(header, el("div", { class: "card" }, el("p", { class: "empty-state" }, "Er staat nog geen menu klaar. Het nieuwe voorstel verschijnt donderdag.")));
+    return;
+  }
+  const tabs = el("nav", { class: "weeks", "aria-label": "Weken" },
+    S.weeks.map(({ week }) => el("button", { "aria-pressed": String(week.id === selected), onclick: () => { selected = week.id; open = {}; render(); } }, shortRange(week))));
+  const { week, feedback } = S.weeks.find((w) => w.week.id === selected);
+  const future = week.days[0] && week.days[0].date > S.today;
+
+  const card = el("section", { class: "card" },
+    el("h2", {}, week.title),
+    el("p", { class: "sub" }, future ? "Voorstel — laat weten wat je ervan vindt" : week.days.some((x) => x.date <= S.today) ? "Geef de gerechten een cijfer" : ""),
+    el("div", { class: "ornament" }),
+    week.days.map((day) => renderDay(week, day, feedback)),
+    renderExtras(week, feedback));
+  app.replaceChildren(header, tabs, card);
+  requestAnimationFrame(() => tabs.querySelector('[aria-pressed="true"]')?.scrollIntoView({ inline: "center", block: "nearest" }));
+}
+
+function renderDay(week, day, feedback) {
+  const eaten = day.date <= S.today;
+  const others = Object.entries(feedback).filter(([p]) => p !== S.me).map(([p, f]) => [p, f.items?.[day.date]]).filter(([, i]) => i && (i.comment || i.rating));
+  const mine = feedback[S.me]?.items?.[day.date];
+  const fbKey = day.date + ":fb", editKey = day.date + ":edit";
+
+  const meta = el("div", { class: "meta" },
+    day.recipeUrl && el("a", { href: day.recipeUrl, target: "_blank", rel: "noopener" }, "Recept"),
+    !day.away && day.dish && el("button", { "aria-expanded": String(!!open[fbKey]), onclick: () => { open[fbKey] = !open[fbKey]; render(); } },
+      eaten ? `Cijfers${others.length ? " (" + others.length + ")" : ""}` : `Reacties${others.length ? " (" + others.length + ")" : ""}`),
+    S.isOwner && el("button", { "aria-expanded": String(!!open[editKey]), onclick: () => { open[editKey] = !open[editKey]; render(); } }, "Aanpassen"));
+
+  return el("article", { class: "day" },
+    el("div", { class: "dayname" }, longDate(day.date)),
+    el("div", { class: "dish" + (day.dish && !day.away ? "" : " empty") }, day.away ? "Niet thuis" : day.dish || "Nog niet ingevuld"),
+    day.notes && el("p", { class: "notes" }, day.notes),
+    day.editedBy === "owner" && el("span", { class: "owner-mark" }, "Aangepast door " + S.owner),
+    (day.ingredients || day.picnic) && el("details", { class: "ingr" }, el("summary", {}, "Ingrediënten"),
+      day.ingredients && el("p", {}, day.ingredients), day.picnic && el("p", { class: "muted" }, day.picnic)),
+    meta,
+    open[fbKey] && renderFeedback(week, day, others, mine, eaten),
+    open[editKey] && renderEdit(week, day));
+}
+
+function renderFeedback(week, day, others, mine, eaten) {
+  let rating = mine?.rating ?? null;
+  const comment = el("textarea", { id: "c" + day.date, maxlength: "1000" }, mine?.comment || "");
+  const status = el("span", { role: "status" });
+  const scale = eaten && el("div", { class: "rating", role: "group", "aria-label": "Cijfer" },
+    Array.from({ length: 10 }, (_, i) => el("button", { type: "button", "aria-pressed": String(rating === i + 1),
+      onclick: (ev) => { rating = rating === i + 1 ? null : i + 1;
+        [...ev.currentTarget.parentNode.children].forEach((b, j) => b.setAttribute("aria-pressed", String(rating === j + 1))); } }, i + 1)));
+  return el("div", { class: "panel" },
+    others.length ? el("ul", { class: "others" }, others.map(([p, i]) =>
+      el("li", {}, el("b", {}, p), i.rating ? el("span", { class: "score" }, i.rating) : null, i.comment ? el("div", {}, i.comment) : null))) : null,
+    el("h3", {}, eaten ? "Jouw cijfer" : "Jouw reactie"),
+    scale,
+    el("label", { class: "f", for: "c" + day.date }, eaten ? "Toelichting" : "Reactie"),
+    comment,
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: async () => {
+        status.className = ""; status.textContent = "";
+        try { await api("feedback", { weekId: week.id, date: day.date, comment: comment.value, rating });
+          status.className = "saved"; status.textContent = "Opgeslagen"; const keep = { ...open }; await load(); open = keep; render(); }
+        catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
+      status));
+}
+
+function renderEdit(week, day) {
+  const f = (id, label, value, multi) => [el("label", { class: "f", for: id }, label),
+    multi ? el("textarea", { id }, value || "") : el("input", { type: id === "e-url" ? "url" : "text", id, value: value || "" })];
+  const away = el("input", { type: "checkbox", id: "e-away", checked: !!day.away });
+  const status = el("span", { role: "status" });
+  const panel = el("div", { class: "panel" },
+    f("e-dish", "Gerecht", day.dish), f("e-ingr", "Ingrediënten", day.ingredients, true),
+    f("e-notes", "Bijzonderheden", day.notes), f("e-url", "Receptlink", day.recipeUrl),
+    el("label", { class: "check" }, away, "Niet thuis eten"),
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: async () => {
+        const v = (id) => panel.querySelector("#" + id).value;
+        try { await api("day", { weekId: week.id, day: { date: day.date, dish: v("e-dish"), ingredients: v("e-ingr"), notes: v("e-notes"), recipeUrl: v("e-url"), away: away.checked } });
+          open[day.date + ":edit"] = false; await load(); }
+        catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
+      el("button", { class: "btn ghost", onclick: () => { open[day.date + ":edit"] = false; render(); } }, "Annuleren"),
+      status));
+  return panel;
+}
+
+function renderExtras(week, feedback) {
+  const firstDay = week.days[0]?.date || week.id;
+  if (firstDay <= S.today) return null; // only for weeks whose groceries still have to be ordered
+  const list = Object.entries(feedback).filter(([p, f]) => f.extras && p !== S.me).map(([p, f]) =>
+    el("li", {}, el("b", {}, p), el("div", { style: "white-space:pre-line" }, f.extras)));
+  const mine = el("textarea", { id: "extras", maxlength: "1000" }, feedback[S.me]?.extras || "");
+  const status = el("span", { role: "status" });
+  return el("div", { class: "extras" },
+    el("h3", {}, "Extra boodschappen"),
+    list.length ? el("ul", { class: "others" }, list) : null,
+    el("label", { class: "f", for: "extras" }, "Jouw lijstje"), mine,
+    el("div", { class: "row" },
+      el("button", { class: "btn", onclick: async () => {
+        try { await api("extras", { weekId: week.id, extras: mine.value }); status.className = "saved"; status.textContent = "Opgeslagen"; await load(); }
+        catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
+      status));
+}
+
+load();
+</script>
+</body>
+</html>

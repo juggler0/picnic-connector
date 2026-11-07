@@ -8,9 +8,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { checkIp, checkSecret } from "../lib/common.mts";
 import { registerTools } from "../lib/tools.mts";
+import { registerMenuTools } from "../lib/menu-tools.mts";
 
 const INSTRUCTIONS =
-  "Persoonlijke Picnic-connector van de gebruiker. Je kunt producten zoeken, aanbiedingen en bestelgeschiedenis bekijken en de winkelmand vullen of aanpassen. " +
+  "Persoonlijke Picnic-connector van de gebruiker, met de gezinsmenu-website (tools menu_*). Je kunt producten zoeken, aanbiedingen en bestelgeschiedenis bekijken en de winkelmand vullen of aanpassen. " +
   "Bestellen en afrekenen kan hier bewust niet: dat doet de gebruiker zelf in de Picnic-app. Een bezorgmoment kiezen mag wel. " +
   "Eerder gekochte producten (boughtBefore=true) zijn een hint, geen vaste voorkeur; vergelijk acties per kilo/liter met het huismerk.";
 
@@ -26,6 +27,7 @@ export default async (req: Request, context: Context) => {
   // A fresh server per request: nothing is kept in memory between calls.
   const server = new McpServer({ name: "picnic-connector", version: "1.1.0" }, { instructions: INSTRUCTIONS });
   registerTools(server);
+  registerMenuTools(server);
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   return transport.handleRequest(req);
