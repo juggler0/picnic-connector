@@ -12,7 +12,7 @@ export default async () => {
   // One-time: move the family menu that was kept in Blobs into the Notion databases (takes priority).
   if (notionConfigured() && (await migrationPending())) {
     try {
-      const m = await migrateFromBlobs(Date.now() + 22_000);
+      const m = await migrateFromBlobs(Date.now() + 10_000);
       console.info("menu migration:", m.finished ? "finished" : "in progress", `weeks=${m.done.length}`);
       return;
     } catch (err) {

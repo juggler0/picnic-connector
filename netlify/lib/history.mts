@@ -1,6 +1,6 @@
 /**
  * Copies the Picnic order history into two Notion databases, a little at a time.
- * Called every minute by the scheduled function history-sync. Each run works for at most ~22 seconds,
+ * Called every 2 minutes by the scheduled function history-sync. Each run works for at most ~10 seconds,
  * remembers where it stopped (in Netlify Blobs) and continues on the next run:
  *  - first a one-time backfill of all completed deliveries (newest first),
  *  - afterwards it checks Picnic every 6 hours for newly completed deliveries.
@@ -9,7 +9,8 @@ import { store, loggedInClient, describeError } from "./common.mts";
 import * as N from "./notion.mts";
 
 const STATE_KEY = "history/state";
-const RUN_MS = 22_000;
+// Netlify answers a scheduled run after ~15 s and retries runs that take longer, so stay well below that.
+const RUN_MS = 10_000;
 const RECHECK_MS = 6 * 60 * 60 * 1000;
 
 export type HistoryState = {
