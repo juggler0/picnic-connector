@@ -41,7 +41,7 @@ export type FeedbackItem = { comment: string; rating: number | null; updatedAt: 
 export type PersonFeedback = { person: string; items: Record<string, FeedbackItem> }; // key = date, or "week" for the menu as a whole
 export type GuestItem = { rating: number; comment: string; at: string; sid?: string; mine?: boolean };
 export type GuestFeedback = { items: Record<string, GuestItem[]> };
-export type Grocery = { id: string; product: string; amount: number | null; picnic: string; status: string; by: string };
+export type Grocery = { id: string; product: string; amount: number | null; picnic: string; price: number | null; status: string; by: string };
 export type MenuEvent = {
   at: string; kind: "feedback" | "guest" | "suggestion" | "owner-edit"; week: string; date?: string; day?: string;
   dish?: string; person: string; rating?: number | null; comment?: string; product?: string;
@@ -157,14 +157,15 @@ function schema(key: DbKey): Record<string, unknown> {
     return s;
   }
   return {
-    Product: { title: {} }, Week: { rich_text: {} }, Aantal: { number: {} }, "Picnic-product": { rich_text: {} },
+    Product: { title: {} }, Week: { rich_text: {} }, Aantal: { number: {} }, "Picnic-product": { rich_text: {} }, Prijs: { number: { format: "euro" } },
     Status: { select: { options: GROCERY_STATUS.map((name) => ({ name })) } },
     Door: { select: { options: ["Claude", ...people].map((name) => ({ name })) } },
   };
 }
 
 let dbCache: Dbs | null = null;
-const schemaSignature = () => users().map((u) => u.name).join(",") + "|" + owner();
+const SCHEMA_VERSION = 2; // raise when schema() gets new columns, so they are added to existing databases
+const schemaSignature = () => `v${SCHEMA_VERSION}|` + users().map((u) => u.name).join(",") + "|" + owner();
 
 /** Finds the three databases (shared with the integration via the page "Weekmenu"); creates missing ones and missing columns. */
 export async function dbs(): Promise<Dbs> {
@@ -281,7 +282,7 @@ const dayWeekId = (page: any) => {
 };
 function toGrocery(page: any): Grocery {
   const P = page.properties;
-  return { id: page.id, product: plain(P.Product), amount: numOf(P.Aantal), picnic: plain(P["Picnic-product"]), status: plain(P.Status) || "gepland", by: plain(P.Door) };
+  return { id: page.id, product: plain(P.Product), amount: numOf(P.Aantal), picnic: plain(P["Picnic-product"]), price: numOf(P.Prijs), status: plain(P.Status) || "gepland", by: plain(P.Door) };
 }
 
 // ---------- weeks ----------
@@ -447,29 +448,53 @@ export async function putDayFromOwner(weekId: string, raw: any) {
 }
 
 // ---------- feedback ----------
-/** A person changes only their own rating and reaction for one day (date "week" = the menu as a whole). */
-export async function putOwnFeedback(person: string, weekId: string, date: string, comment: unknown, rating: unknown): Promise<FeedbackItem | null> {
-  if (!isDate(weekId) || !(isDate(date) || date === "week")) throw new Error("Ongeldige week of dag");
+const parseRating = (rating: unknown) => {
   const r = rating === null || rating === "" || rating === undefined ? null : Number(rating);
   if (r !== null && !(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Cijfer moet 1 t/m 10 zijn");
-  if (r !== null && (date === "week" || date > today())) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
+  return r;
+};
+
+/**
+ * A rating for one eaten day (null = remove). Can be changed as often as you like.
+ * Everyone sets their own; the owner may also set someone else's.
+ */
+export async function putRating(actor: string, person: string, weekId: string, date: string, rating: unknown) {
+  if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
+  if (!users().some((u) => u.name === person)) throw new Error("Onbekende persoon");
+  if (person !== actor && actor !== owner()) throw new Error("Je kunt alleen je eigen cijfer geven.");
+  const r = parseRating(rating);
+  if (r !== null && date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
+  return withDbs(async () => {
+    const page = await findDayPage(date);
+    if (!page || !plain(page.properties.Gerecht) || page.properties["Niet thuis"]?.checkbox) throw new Error("Dit gerecht bestaat niet");
+    await N.notion("PATCH", `/pages/${page.id}`, { properties: { [person]: N.num(r) } });
+    await logEvent({ kind: "feedback", week: weekId, date, day: dayName(date), dish: plain(page.properties.Gerecht), person, rating: r, ...(person !== actor ? { comment: `(cijfer ingevuld door ${actor})` } : {}) });
+    return { person, rating: r };
+  });
+}
+
+/** A reaction on a dish (or "week" = the whole menu): once per person; after that it can no longer be changed. */
+export async function putComment(person: string, weekId: string, date: string, comment: unknown) {
+  if (!isDate(weekId) || !(isDate(date) || date === "week")) throw new Error("Ongeldige week of dag");
   const text = clip(comment, 1000).trim();
+  if (!text) throw new Error("Schrijf eerst een reactie");
   return withDbs(async (D) => {
     let dish = "";
     if (date === "week") {
       const wp = await findWeekPage(weekId);
+      if (wp && plain(wp.properties[reactionProp(person)])) throw new Error("Je hebt al gereageerd op dit menu.");
       const props = { [reactionProp(person)]: N.text(text) };
       if (wp) await N.notion("PATCH", `/pages/${wp.id}`, { properties: props });
       else await N.notion("POST", "/pages", { parent: { database_id: D.weeks }, properties: { ...props, Week: N.title(`Week van ${weekId}`), "Week-id": N.text(weekId), Status: N.select("voorstel") } });
     } else {
       const page = await findDayPage(date);
       if (!page) throw new Error("Deze dag staat niet in het menu");
+      if (plain(page.properties[reactionProp(person)])) throw new Error("Je hebt hier al gereageerd.");
       dish = plain(page.properties.Gerecht);
-      // Overwrites: one rating and one reaction per person per day.
-      await N.notion("PATCH", `/pages/${page.id}`, { properties: { [person]: N.num(r), [reactionProp(person)]: N.text(text) } });
+      await N.notion("PATCH", `/pages/${page.id}`, { properties: { [reactionProp(person)]: N.text(text) } });
     }
-    await logEvent({ kind: "feedback", week: weekId, date, day: date === "week" ? "hele menu" : dayName(date), dish, person, rating: r, comment: text });
-    return text || r !== null ? { rating: r, comment: text, updatedAt: new Date().toISOString() } : null;
+    await logEvent({ kind: "feedback", week: weekId, date, day: date === "week" ? "hele menu" : dayName(date), dish, person, comment: text });
+    return { comment: text, rating: null, updatedAt: new Date().toISOString() } as FeedbackItem;
   });
 }
 
@@ -488,11 +513,18 @@ export async function guestQuotaLeft(): Promise<number> {
   return Math.max(0, GUEST_PER_DAY - log.filter((t) => Date.now() - Date.parse(t) < 864e5).length);
 }
 
+async function guestDish(date: string) {
+  const page = await findDayPage(date);
+  const dish = page ? plain(page.properties.Gerecht) : "";
+  if (!page || !dish || page.properties["Niet thuis"]?.checkbox) throw new Error("Dit gerecht bestaat niet");
+  return { page, dish };
+}
+
 /**
- * A guest rates an eaten dish. Rating the same dish again in the same session updates that rating
+ * A guest rates an eaten dish. Changing it again in the same session updates that rating
  * (and does not use up another of the 3 ratings per day).
  */
-export async function putGuestRating(sid: string, weekId: string, date: string, rating: unknown, comment: unknown) {
+export async function putGuestRating(sid: string, weekId: string, date: string, rating: unknown) {
   if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
   if (date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
   const r = Number(rating);
@@ -503,15 +535,11 @@ export async function putGuestRating(sid: string, weekId: string, date: string, 
   const own = sid ? list.find((x) => x.sid === sid) : undefined;
   const log = (((await s.get("guest/quota", { type: "json" })) as string[] | null) ?? []).filter((t) => Date.now() - Date.parse(t) < 864e5);
   if (!own && log.length >= GUEST_PER_DAY) throw new Error(`Als gast kun je ${GUEST_PER_DAY} cijfers per dag geven. Morgen kan het weer.`);
-
   return withDbs(async () => {
-    const page = await findDayPage(date);
-    const dish = page ? plain(page.properties.Gerecht) : "";
-    if (!page || !dish || page.properties["Niet thuis"]?.checkbox) throw new Error("Dit gerecht bestaat niet");
-    const text = clip(comment, 1000).trim();
+    const { page, dish } = await guestDish(date);
     const at = new Date().toISOString();
-    if (own) Object.assign(own, { rating: r, comment: text, at });
-    else list.push({ rating: r, comment: text, at, sid });
+    if (own) Object.assign(own, { rating: r, at });
+    else list.push({ rating: r, comment: "", at, sid });
     g.items[date] = list.slice(-20);
     await s.setJSON(`guest/${weekId}`, g);
     if (!own) {
@@ -519,7 +547,26 @@ export async function putGuestRating(sid: string, weekId: string, date: string, 
       await s.setJSON("guest/quota", log);
     }
     await writeGuestSummary(page.id, g.items[date]);
-    await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, rating: r, comment: text });
+    await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, rating: r });
+    return publicGuest(g, sid);
+  });
+}
+
+/** A guest's reaction on a dish they rated in this session: once. */
+export async function putGuestComment(sid: string, weekId: string, date: string, comment: unknown) {
+  if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
+  const text = clip(comment, 1000).trim();
+  if (!text) throw new Error("Schrijf eerst een reactie");
+  const g = await getGuestFeedback(weekId);
+  const own = sid ? (g.items[date] ?? []).find((x) => x.sid === sid) : undefined;
+  if (!own) throw new Error("Geef eerst een cijfer");
+  if (own.comment) throw new Error("Je hebt hier al gereageerd.");
+  return withDbs(async () => {
+    const { page, dish } = await guestDish(date);
+    own.comment = text;
+    await menuStore().setJSON(`guest/${weekId}`, g);
+    await writeGuestSummary(page.id, g.items[date]);
+    await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, rating: own.rating, comment: text });
     return publicGuest(g, sid);
   });
 }
@@ -579,7 +626,7 @@ export async function changeGrocery(person: string, id: unknown, action: unknown
  * (a product the owner rejected stays rejected); with replace, Claude's planned products that are not in the
  * new list are removed. Family suggestions are never touched.
  */
-export async function putGroceriesFromClaude(weekId: string, items: { product: string; amount?: number | null; picnic?: string }[], replace: boolean, deadline?: number) {
+export async function putGroceriesFromClaude(weekId: string, items: { product: string; amount?: number | null; picnic?: string; price?: number | null }[], replace: boolean, deadline?: number) {
   if (!isDate(weekId)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
   return withDbs(async (D) => {
     const rows = await queryAll(D.groceries, { filter: { property: "Week", rich_text: { equals: weekId } } });
@@ -589,7 +636,9 @@ export async function putGroceriesFromClaude(weekId: string, items: { product: s
     const work: (() => Promise<void>)[] = [];
     for (const it of items) {
       const prev = byName.get(key(it.product));
-      const props: Record<string, unknown> = { Aantal: N.num(it.amount ?? null), "Picnic-product": N.text(clip(it.picnic, 500)) };
+      const props: Record<string, unknown> = { "Picnic-product": N.text(clip(it.picnic, 500)) };
+      if (it.amount != null || !prev) props.Aantal = N.num(it.amount ?? null);
+      if (it.price != null) props.Prijs = N.num(Math.round(it.price * 100) / 100);
       if (prev) work.push(() => N.notion("PATCH", `/pages/${prev.id}`, { properties: props }));
       else work.push(() => N.notion("POST", "/pages", { parent: { database_id: D.groceries }, properties: { ...props, Product: N.title(clip(it.product, 120)), Week: N.text(weekId), Status: N.select("gepland"), Door: N.select("Claude") } }));
     }

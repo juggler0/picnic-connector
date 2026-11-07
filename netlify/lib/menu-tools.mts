@@ -83,11 +83,16 @@ export function registerMenuTools(server: McpServer) {
 
   server.tool(
     "menu_put_groceries",
-    "Zet de geplande standaard boodschappen van een week (onder het menu op de website, status 'gepland'). Bestaande regels met dezelfde productnaam worden bijgewerkt; een product dat de eigenaar heeft afgewezen blijft afgewezen. Met replace=true verdwijnen jouw eerder geplande producten die niet meer in de lijst staan. Suggesties van het gezin worden nooit aangeraakt. notDone > 0: roep opnieuw aan.",
+    "Zet de geplande standaard boodschappen van een week (onder het menu op de website, status 'gepland'). Bestaande regels met dezelfde productnaam worden bijgewerkt (ook suggesties van het gezin: zo vul je hun exacte Picnic-product en prijs in, met replace=false); een product dat de eigenaar heeft afgewezen blijft afgewezen. Met replace=true verdwijnen jouw eerder geplande producten die niet meer in de lijst staan. Suggesties van het gezin worden nooit weggehaald en hun status blijft. notDone > 0: roep opnieuw aan.",
     {
       week_id: weekId,
       items: z
-        .array(z.object({ product: z.string().min(1).max(120).describe("Korte naam, bijv. 'Halfvolle melk'"), amount: z.coerce.number().int().min(1).max(50).nullable().default(null), picnic: z.string().max(500).default("").describe("Exact Picnic-product") }))
+        .array(z.object({
+          product: z.string().min(1).max(120).describe("Categorie/korte naam, bijv. 'Brood' of 'Halfvolle melk'. Gebruik voor een suggestie van het gezin precies de naam die zij gaven."),
+          amount: z.coerce.number().int().min(1).max(50).nullable().default(null).describe("Leeg = aantal laten staan"),
+          picnic: z.string().max(500).default("").describe("Exact Picnic-product met merk en verpakking, bijv. 'Le Petit Moulin vloerbrood spelt 800 g'"),
+          price: z.coerce.number().min(0).max(500).nullable().default(null).describe("Prijs per stuk in euro"),
+        }))
         .max(80),
       replace: z.boolean().default(true),
     },
