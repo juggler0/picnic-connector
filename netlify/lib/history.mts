@@ -36,15 +36,14 @@ const saveState = (s: HistoryState) => store().setJSON(STATE_KEY, { ...s, update
 export async function runHistorySync(): Promise<HistoryState> {
   const started = Date.now();
   const timeLeft = () => Date.now() - started < RUN_MS;
+  // The Notion export is optional: without NOTION_TOKEN this does nothing at all (no storage reads either).
+  if (!N.notionConfigured()) return { done: [], queue: [], note: "NOTION_TOKEN ontbreekt in Netlify." };
+
   const s = await loadState();
   s.failed ??= {};
   s.linesWritten ??= 0;
-
-  // The Notion export is optional: without NOTION_TOKEN this does nothing at all.
-  if (!N.notionConfigured()) {
-    s.note = "NOTION_TOKEN ontbreekt in Netlify.";
-    return s;
-  }
+  // Nothing to do until the next 6-hour check: stop right away to save compute.
+  if (s.ordersDb && !s.current && s.queue.length === 0 && s.lastListAt && Date.now() - s.lastListAt < RECHECK_MS) return s;
 
   // 1. Notion setup: find the shared page, create the databases once.
   if (!s.parentId) {

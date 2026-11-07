@@ -113,7 +113,7 @@ See [`.env.example`](.env.example). After changing a variable: **Deploys → Tri
 
 A scheduled function then creates two databases on that page — **Picnic bestellingen** (one row per delivery) and
 **Picnic bestelregels** (one row per product per delivery) — copies all completed deliveries once (newest first;
-large histories take a few hours because Notion allows ~3 changes per second) and afterwards checks every 6 hours for
+large histories take several hours because Notion allows ~3 changes per second) and afterwards checks every 6 hours for
 new deliveries. Progress: button **Voortgang bestelgeschiedenis** on the login page. Payment details are never copied.
 
 ---
@@ -135,6 +135,12 @@ Found a security problem? See [SECURITY.md](SECURITY.md).
 
 Netlify redeploys automatically on every change to your repository's `main` branch.
 To get improvements from this repository into your fork: on GitHub, **Sync fork**.
+
+## Netlify credits (Free plan)
+
+The Free plan has 300 credits a month; when they run out, the site pauses until the next month.
+Each production deploy costs 15 credits, so bundle code changes. Documentation-only changes don't trigger a deploy
+(see `ignore` in `netlify.toml`). The connector itself uses very little: requests and a few seconds of compute.
 
 ## Development
 

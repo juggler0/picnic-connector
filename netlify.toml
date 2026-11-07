@@ -1,5 +1,7 @@
 [build]
   publish = "public"
+  # Skip the build (and its Netlify credits) when only documentation changed.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- netlify/ public/ package.json package-lock.json netlify.toml"
 
 [functions]
   node_bundler = "esbuild"

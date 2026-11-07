@@ -1,5 +1,5 @@
 /**
- * Scheduled every minute by Netlify: copies the Picnic order history into Notion bit by bit
+ * Scheduled every 2 minutes by Netlify: copies the Picnic order history into Notion bit by bit
  * (see netlify/lib/history.mts). Does nothing until NOTION_TOKEN is set in Netlify.
  */
 import type { Config } from "@netlify/functions";
@@ -10,4 +10,5 @@ export default async () => {
   console.info("history sync:", s.note, `done=${s.done.length}`, `queue=${s.queue.length}`, `lines=${s.linesWritten}`);
 };
 
-export const config: Config = { schedule: "* * * * *" };
+// Every 2 minutes: fast enough for the one-time copy, cheap when there is nothing to do.
+export const config: Config = { schedule: "*/2 * * * *" };
