@@ -5,7 +5,9 @@
  *
  * Works a little at a time (called every 2 minutes by the scheduled function prices-sync, ~10 s per run):
  *  1. reads newly copied order lines from "Picnic bestelregels" to know which products were ever bought,
- *  2. from Monday of each new week: looks up the current price of each of those products at Picnic and fills in
+ *  2. once: fills the weeks before that from the order history itself — the price per unit actually paid in the
+ *     weeks a product was bought — in "Picnic prijzen <year>" databases for every year with orders,
+ *  3. from Monday of each new week: looks up the current price of each of those products at Picnic and fills in
  *     that week's column. About 1000 products take roughly an hour and a half.
  * Needs NOTION_TOKEN and the order-history copy (history.mts); does nothing until both are there.
  */
@@ -15,9 +17,12 @@ import { loadState as loadHistoryState } from "./history.mts";
 
 const STATE_KEY = "prices/state";
 const PRODUCTS_KEY = "prices/products";
+const HIST_KEY = "prices/hist";
 const RUN_MS = 10_000;
 
 type Product = { name: string; unit: string; count: number; last: string };
+/** Paid prices from the order history: year → product → week → [cents paid, units]. */
+type Hist = Record<string, Record<string, { name: string; unit: string; count: number; last: string; weeks: Record<string, [number, number]> }>>;
 type Stats = { price: number | null; prev: number | null; low: number | null; high: number | null };
 type PriceState = {
   linesSeenUntil?: string; // created_time of the last order line read
@@ -29,6 +34,8 @@ type PriceState = {
   pages?: Record<string, string>; // product id → Notion page id (this year's database)
   stats?: Record<string, Stats>; // per product, this year
   done?: boolean;
+  /** One-time fill of past weeks from the order history. */
+  hist?: { todo: string[] | null; done: boolean; firstLiveWeek: string; pages: Record<string, Record<string, string>>; dbs: Record<string, string> };
   note?: string;
   updatedAt?: number;
 };
@@ -49,12 +56,53 @@ export function isoWeek(d = new Date()) {
   return { year, week: 1 + Math.round((local.getTime() - firstThursday.getTime()) / (7 * 864e5)) };
 }
 
+const pad = (n: number) => String(n).padStart(2, "0");
 const plain = (p: any) => (p?.rich_text ?? p?.title ?? []).map((x: any) => x.plain_text).join("");
 
 async function findDatabase(title: string): Promise<string | null> {
   const res = await N.notion("POST", "/search", { query: title, filter: { property: "object", value: "database" } });
   const db = (res.results ?? []).find((d: any) => !d.archived && (d.title ?? []).map((x: any) => x.plain_text).join("").trim() === title);
   return db?.id ?? null;
+}
+
+const PRICE_SCHEMA = {
+  Product: { title: {} },
+  "Prijs nu": { number: { format: "euro" } },
+  "Vorige week": { number: { format: "euro" } },
+  Verandering: { number: { format: "percent" } },
+  Laagste: { number: { format: "euro" } },
+  Hoogste: { number: { format: "euro" } },
+  Actie: { rich_text: {} },
+  Leverbaar: { checkbox: {} },
+  Verpakking: { rich_text: {} },
+  "Keer gekocht": { number: {} },
+  "Laatst gekocht": { date: {} },
+  "Product-id": { rich_text: {} },
+};
+
+/** "Picnic prijzen <year>" on the history page: finds it or creates it. */
+async function yearDb(year: number | string, parentId: string): Promise<string> {
+  const title = `Picnic prijzen ${year}`;
+  const found = await findDatabase(title);
+  if (found) return found;
+  const db = await N.notion("POST", "/databases", {
+    parent: { type: "page_id", page_id: parentId },
+    icon: { type: "emoji", emoji: "🏷️" },
+    title: [{ text: { content: title } }],
+    properties: PRICE_SCHEMA,
+  });
+  return db.id;
+}
+/** Product id → page id of the rows already in a price database. */
+async function existingRows(db: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  let cursor: string | undefined;
+  do {
+    const r = await N.notion("POST", `/databases/${db}/query`, { page_size: 100, start_cursor: cursor });
+    for (const p of r.results ?? []) if (!p.archived) out[plain(p.properties["Product-id"])] = p.id;
+    cursor = r.has_more ? r.next_cursor : undefined;
+  } while (cursor);
+  return out;
 }
 
 export async function runPriceSync(): Promise<PriceState> {
@@ -74,6 +122,8 @@ export async function runPriceSync(): Promise<PriceState> {
   try {
     // 1. Products ever bought, from the order lines copied since the last look.
     const products = ((await store().get(PRODUCTS_KEY, { type: "json" })) as Record<string, Product> | null) ?? {};
+    const collectHist = !s.hist?.done;
+    const hist = collectHist ? (((await store().get(HIST_KEY, { type: "json" })) as Hist | null) ?? {}) : {};
     let more = true;
     while (more && timeLeft()) {
       const r = await N.notion("POST", `/databases/${h.linesDb}/query`, {
@@ -86,61 +136,101 @@ export async function runPriceSync(): Promise<PriceState> {
         if (l.archived || l.in_trash) continue;
         const P = l.properties;
         const id = plain(P["Product-id"]);
-        if (!id) continue;
+        if (!id || P["Niet geleverd"]?.checkbox) continue;
         const day = P.Datum?.date?.start?.slice(0, 10) ?? "";
         const p = (products[id] ??= { name: plain(P.Product), unit: plain(P.Verpakking), count: 0, last: "" });
         p.count += P.Aantal?.number ?? 1;
         if (day >= p.last) Object.assign(p, { last: day, name: plain(P.Product) || p.name, unit: plain(P.Verpakking) || p.unit });
+        // Price actually paid per unit, per ISO week (skip lines that were not delivered).
+        const paid = P.Prijs?.number, qty = P.Aantal?.number;
+        if (collectHist && day && typeof paid === "number" && paid > 0 && qty > 0 && !P["Niet geleverd"]?.checkbox) {
+          const w = isoWeek(new Date(day + "T12:00:00Z"));
+          const y = (hist[w.year] ??= {});
+          const e = (y[id] ??= { name: plain(P.Product), unit: plain(P.Verpakking), count: 0, last: "", weeks: {} });
+          e.count += qty;
+          if (day >= e.last) Object.assign(e, { last: day, name: plain(P.Product) || e.name, unit: plain(P.Verpakking) || e.unit });
+          const cell = (e.weeks[pad(w.week)] ??= [0, 0]);
+          cell[0] += Math.round(paid * 100);
+          cell[1] += qty;
+        }
       }
       more = Boolean(r.has_more);
     }
     await store().setJSON(PRODUCTS_KEY, products);
+    if (collectHist) await store().setJSON(HIST_KEY, hist);
     await saveState(s);
     if (more) return { ...s, note: "Producten verzamelen…" };
 
-    // 2. A new week: make sure this year's database and the week column exist, then list the work.
+    // 2. Once: past weeks from the order history (one database per year, a column per week with purchases).
+    if (!s.hist?.done) {
+      s.hist ??= { todo: null, done: false, firstLiveWeek: weekKey, pages: {}, dbs: {} };
+      const H = s.hist;
+      if (!H.todo) {
+        H.todo = Object.keys(hist).sort().flatMap((y) => Object.keys(hist[y]).map((pid) => `${y}|${pid}`));
+        await saveState(s);
+      }
+      while (H.todo.length && timeLeft()) {
+        const [y, pid] = H.todo[0].split("|");
+        if (!H.dbs[y]) {
+          H.dbs[y] = await yearDb(y, h.parentId);
+          H.pages[y] = await existingRows(H.dbs[y]);
+          // Columns for every week with purchases (before the first live week).
+          const weeks = new Set<string>();
+          for (const e of Object.values(hist[y])) for (const wk of Object.keys(e.weeks)) if (`${y}-W${wk}` < H.firstLiveWeek) weeks.add(wk);
+          if (weeks.size) await N.notion("PATCH", `/databases/${H.dbs[y]}`, { properties: Object.fromEntries([...weeks].sort().map((wk) => [`Wk ${wk}`, { number: { format: "euro" } }])) });
+          await saveState(s);
+          continue;
+        }
+        const e = hist[y][pid];
+        const cells = Object.entries(e.weeks).filter(([wk]) => `${y}-W${wk}` < H.firstLiveWeek).sort(([a], [b]) => a.localeCompare(b));
+        const unit = cells.map(([, [cents, qty]]) => Math.round(cents / qty));
+        const props: Record<string, unknown> = {
+          Product: N.title(e.name || pid),
+          "Product-id": N.text(pid),
+          Verpakking: N.text(e.unit),
+          Laagste: N.euros(unit.length ? Math.min(...unit) : null),
+          Hoogste: N.euros(unit.length ? Math.max(...unit) : null),
+          "Keer gekocht": N.num(e.count),
+          "Laatst gekocht": N.date(e.last || null),
+        };
+        cells.forEach(([wk], i) => (props[`Wk ${wk}`] = N.euros(unit[i])));
+        const pageId = H.pages[y][pid];
+        if (pageId) await N.notion("PATCH", `/pages/${pageId}`, { properties: props });
+        else H.pages[y][pid] = (await N.notion("POST", "/pages", { parent: { database_id: H.dbs[y] }, properties: props })).id;
+        H.todo.shift();
+        if (H.todo.length % 10 === 0) await saveState(s);
+      }
+      if (H.todo.length) {
+        s.note = `Prijsgeschiedenis uit oude bestellingen: nog ${H.todo.length} producten.`;
+        await saveState(s);
+        return s;
+      }
+      H.done = true;
+      // Lowest/highest of this year so far, as the starting point for the weekly lookups.
+      s.stats = {};
+      for (const [pid, e] of Object.entries(hist[year] ?? {})) {
+        const unit = Object.entries(e.weeks).filter(([wk]) => `${year}-W${wk}` < H.firstLiveWeek).map(([, [c, q]]) => Math.round(c / q));
+        if (unit.length) s.stats[pid] = { price: null, prev: null, low: Math.min(...unit), high: Math.max(...unit) };
+      }
+      Object.assign(s, { year, db: H.dbs[year] ?? undefined, pages: H.pages[year] ?? {} });
+      H.pages = {}; // no longer needed
+      await store().delete(HIST_KEY);
+      await saveState(s);
+    }
+
+    // 3. A new week: make sure this year's database and the week column exist, then list the work.
     if (s.week !== weekKey) {
       if (s.year !== year || !s.db) {
-        const title = `Picnic prijzen ${year}`;
-        s.db = (await findDatabase(title)) ?? undefined;
-        if (!s.db) {
-          const db = await N.notion("POST", "/databases", {
-            parent: { type: "page_id", page_id: h.parentId },
-            icon: { type: "emoji", emoji: "🏷️" },
-            title: [{ text: { content: title } }],
-            properties: {
-              Product: { title: {} },
-              "Prijs nu": { number: { format: "euro" } },
-              "Vorige week": { number: { format: "euro" } },
-              Verandering: { number: { format: "percent" } },
-              Laagste: { number: { format: "euro" } },
-              Hoogste: { number: { format: "euro" } },
-              Actie: { rich_text: {} },
-              Leverbaar: { checkbox: {} },
-              Verpakking: { rich_text: {} },
-              "Keer gekocht": { number: {} },
-              "Laatst gekocht": { date: {} },
-              "Product-id": { rich_text: {} },
-            },
-          });
-          s.db = db.id;
-        }
-        Object.assign(s, { year, pages: {}, stats: {} });
-        // Existing rows (e.g. after a restart).
-        let cursor: string | undefined;
-        do {
-          const r = await N.notion("POST", `/databases/${s.db}/query`, { page_size: 100, start_cursor: cursor });
-          for (const p of r.results ?? []) if (!p.archived) s.pages![plain(p.properties["Product-id"])] = p.id;
-          cursor = r.has_more ? r.next_cursor : undefined;
-        } while (cursor);
+        s.db = await yearDb(year, h.parentId);
+        Object.assign(s, { year, pages: await existingRows(s.db), stats: s.year === year ? s.stats ?? {} : {} });
       }
-      const column = `Wk ${String(week).padStart(2, "0")}`;
+      const column = `Wk ${pad(week)}`;
       await N.notion("PATCH", `/databases/${s.db}`, { properties: { [column]: { number: { format: "euro" } } } });
       Object.assign(s, { week: weekKey, column, todo: Object.keys(products), done: false });
       await saveState(s);
     }
 
-    // 3. This week's prices, product by product.
+    // 4. This week's prices, product by product.
     const client = await loggedInClient();
     if (!client) return { ...s, note: "Niet ingelogd bij Picnic." };
     let n = 0;

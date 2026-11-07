@@ -141,7 +141,9 @@ new deliveries. Progress: button **Voortgang bestelgeschiedenis** on the login p
 Once the history is complete, a second scheduled function keeps **Picnic prijzen <year>** on the same page: one row
 per product you ever ordered and one column per week (`Wk 46`) with that week's price, plus current price, last week,
 change, lowest/highest this year and the current promotion. It looks up each product once a week (from Monday),
-about 1000 products in roughly an hour and a half, and a new database is started each year.
+about 1000 products in roughly an hour and a half, and a new database is started each year. Before that, once, it fills the past
+from the order history itself: for every year with orders a database **Picnic prijzen <year>** with a column for each
+week in which something was bought, holding the price per unit actually paid that week.
 
 ---
 
