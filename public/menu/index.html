@@ -32,7 +32,10 @@
 
   .weeks { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 14px; scrollbar-width: none; }
   .weeks button { flex: none; border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 6px 14px; font-size: .9rem; cursor: pointer; color: var(--muted); }
-  .weeks button[aria-pressed="true"] { background: var(--ink); color: var(--card); border-color: var(--ink); }
+  .weeks button.past { opacity: .7; }
+  .weeks button.now { border-color: var(--brass); color: var(--brass); }
+  .weeks button.next { background: var(--brass-soft); border-color: var(--brass-soft); color: var(--ink); }
+  .weeks button[aria-pressed="true"] { background: var(--ink); color: var(--card); border-color: var(--ink); opacity: 1; }
 
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 36px 22px 28px; }
   .card > h2 { font: 400 1.35rem/1.25 var(--serif); text-align: center; margin: 0 0 4px; }
@@ -136,7 +139,7 @@ const d = (iso) => new Date(iso + "T12:00:00");
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const longDate = (iso) => `${cap(DAYS[d(iso).getDay()])} ${d(iso).getDate()} ${MONTHS[d(iso).getMonth()]}`;
 const shortRange = (w) => {
-  const a = d(w.days[0]?.date || w.id), b = d(w.days.at(-1)?.date || w.id);
+  const a = d(w.id), b = d(plus6(w.id)); // always Friday to Thursday
   return a.getMonth() === b.getMonth()
     ? `${a.getDate()}–${b.getDate()} ${MONTHS[a.getMonth()].slice(0,3)}`
     : `${a.getDate()} ${MONTHS[a.getMonth()].slice(0,3)} – ${b.getDate()} ${MONTHS[b.getMonth()].slice(0,3)}`;
@@ -198,6 +201,8 @@ async function renderLogin() {
 }
 
 // ---------- the menu ----------
+const plus6 = (iso) => { const x = d(iso); x.setDate(x.getDate() + 6); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
+const phase = (w) => (plus6(w.id) < S.today ? "past" : w.id > S.today ? "next" : "now");
 function render() {
   const header = el("header", {},
     el("h1", {}, "Ons menu"),
@@ -207,7 +212,7 @@ function render() {
     return;
   }
   const tabs = el("nav", { class: "weeks", "aria-label": "Weken" },
-    S.weeks.map(({ week }) => el("button", { "aria-pressed": String(week.id === selected), onclick: () => { selected = week.id; editing = {}; render(); } }, shortRange(week))));
+    S.weeks.map(({ week }) => el("button", { class: phase(week), title: { past: "Geweest", now: "Deze week", next: "Komt nog" }[phase(week)], "aria-pressed": String(week.id === selected), onclick: () => { selected = week.id; editing = {}; render(); } }, shortRange(week))));
   const W = S.weeks.find((w) => w.week.id === selected);
   const future = W.week.days[0] && W.week.days[0].date > S.today;
   const card = el("section", { class: "card" },
