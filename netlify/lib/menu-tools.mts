@@ -43,6 +43,7 @@ export function registerMenuTools(server: McpServer) {
       owner: M.owner(),
       week: await M.getWeek(week_id),
       feedback: await M.getFeedback(week_id),
+      guest: await M.getGuestFeedback(week_id),
     })),
   );
 
@@ -63,6 +64,10 @@ export function registerMenuTools(server: McpServer) {
             notes: z.string().max(500).default("").describe("Bijzonderheden"),
             recipeUrl: z.string().max(500).default(""),
             away: z.boolean().default(false).describe("true = niet thuis eten"),
+            ratings: z
+              .record(z.object({ rating: z.coerce.number().int().min(1).max(10).nullable().default(null), comment: z.string().max(1000).default("") }))
+              .optional()
+              .describe("Alleen bij het overzetten van oude weken: bestaande cijfers uit Notion per persoon, bijv. {\"Johan\": {\"rating\": 8, \"comment\": \"\"}}. Overschrijft nooit wat iemand op de website invulde."),
           }),
         )
         .min(1)
@@ -76,7 +81,7 @@ export function registerMenuTools(server: McpServer) {
 
   server.tool(
     "menu_get_new_ratings",
-    "Alle cijfers en opmerkingen van het gezin die zijn ingevuld of gewijzigd na de laatst verwerkte keer (of na 'since'), met week, dag, gerecht en persoon. Gebruik daarna menu_mark_ratings_processed. Alleen lezen.",
+    "Alle cijfers en opmerkingen van het gezin (en van gasten, person 'Gast') die zijn ingevuld of gewijzigd na de laatst verwerkte keer (of na 'since'), met week, dag, gerecht en persoon. Gebruik daarna menu_mark_ratings_processed. Alleen lezen.",
     { since: z.string().optional().describe("ISO-tijdstip; standaard het moment van de vorige verwerking") },
     async ({ since }) => run("menu_get_new_ratings", { since }, async () => {
       const from = since ?? ((await M.menuStore().get(PROCESSED_KEY, { type: "text" })) || "1970-01-01T00:00:00Z");
@@ -84,9 +89,17 @@ export function registerMenuTools(server: McpServer) {
       for (const id of await M.listWeekIds()) {
         const week = await M.getWeek(id);
         const fb = await M.getFeedback(id);
+        for (const [date, list] of Object.entries((await M.getGuestFeedback(id)).items)) {
+          for (const g of list) {
+            if (g.at > from) {
+              const day = week?.days.find((d) => d.date === date);
+              out.push({ week: id, date, day: M.dayName(date), dish: day?.dish ?? "", person: M.GUEST, rating: g.rating, comment: g.comment, updatedAt: g.at });
+            }
+          }
+        }
         for (const [person, f] of Object.entries(fb)) {
           for (const [date, item] of Object.entries(f.items)) {
-            if (item.updatedAt > from) {
+            if (item.updatedAt > from && item.source !== "notion") {
               const day = week?.days.find((d) => d.date === date);
               out.push({ week: id, date, day: date === "week" ? "hele menu" : M.dayName(date), dish: day?.dish ?? "", person, rating: item.rating, comment: item.comment, updatedAt: item.updatedAt });
             }

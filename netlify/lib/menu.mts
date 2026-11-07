@@ -28,7 +28,9 @@ export type Day = {
   editedAt: string;
 };
 export type Week = { id: string; title: string; status: string; days: Day[]; updatedAt: string };
-export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string };
+export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string; source?: "notion" };
+export type GuestItem = { rating: number; comment: string; at: string };
+export type GuestFeedback = { items: Record<string, GuestItem[]> };
 export type PersonFeedback = { person: string; items: Record<string, FeedbackItem> }; // key = date, or "week" for the menu as a whole
 
 const DAY_NAMES = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
@@ -56,13 +58,17 @@ const eq = (a: string, b: string) => {
   return x.length === y.length && timingSafeEqual(x, y);
 };
 
+/** The shared guest account: may read everything and give a few ratings per day. */
+export const GUEST = "Gast";
+export const GUEST_PER_DAY = 3;
+
 // ---------- sessions: "name.expiry.signature" in an HttpOnly cookie ----------
 const SESSION_DAYS = 120;
 const sessionKey = () => createHmac("sha256", Netlify.env.get("CONNECTOR_SECRET") ?? "").update("menu-session-v1").digest();
 const sign = (payload: string) => createHmac("sha256", sessionKey()).update(payload).digest("base64url");
 
-export function makeSession(name: string) {
-  const payload = `${Buffer.from(name).toString("base64url")}.${Date.now() + SESSION_DAYS * 864e5}`;
+export function makeSession(name: string, days = SESSION_DAYS) {
+  const payload = `${Buffer.from(name).toString("base64url")}.${Date.now() + days * 864e5}`;
   return `${payload}.${sign(payload)}`;
 }
 export function readSession(req: Request): string | null {
@@ -71,6 +77,7 @@ export function readSession(req: Request): string | null {
   const [n, exp, sig] = m[1].split(".");
   if (!n || !exp || !sig || !eq(sig, sign(`${n}.${exp}`)) || Number(exp) < Date.now()) return null;
   const name = Buffer.from(n, "base64url").toString();
+  if (name === GUEST) return GUEST;
   return findUser(name)?.name ?? null; // a removed user is logged out
 }
 export const sessionCookie = (value: string, maxAgeDays = SESSION_DAYS) =>
@@ -119,6 +126,33 @@ const cleanDay = (d: any, editedBy: Day["editedBy"]): Day => ({
  * Claude writes a week. Days the owner edited on the website keep the owner's dish, ingredients,
  * notes, recipe and "away"; Claude may still update the Picnic products of those days.
  */
+/**
+ * Ratings that already exist in Notion (columns J/A/L/M) can be passed along per day as
+ * ratings: { "Johan": {rating, comment}, ... }. They are stored as that person's feedback with source "notion",
+ * but never overwrite what the person entered on the website, and are not reported as "new" to Claude.
+ */
+async function importRatings(weekId: string, days: any[]) {
+  const people = users().map((u) => u.name);
+  for (const person of people) {
+    const key = `feedback/${weekId}/${person.toLowerCase()}`;
+    let f = (await menuStore().get(key, { type: "json" })) as PersonFeedback | null;
+    let changed = false;
+    for (const d of days) {
+      const r = d?.ratings?.[person];
+      if (!r || !isDate(d.date)) continue;
+      f ??= { person, items: {} };
+      const existing = f.items[d.date];
+      if (existing && existing.source !== "notion") continue;
+      const rating = Number.isInteger(r.rating) && r.rating >= 1 && r.rating <= 10 ? r.rating : null;
+      const comment = clip(r.comment, 1000).trim();
+      if (rating === null && !comment) continue;
+      f.items[d.date] = { rating, comment, updatedAt: existing?.updatedAt ?? new Date().toISOString(), source: "notion" };
+      changed = true;
+    }
+    if (changed && f) await menuStore().setJSON(key, f);
+  }
+}
+
 export async function putWeekFromClaude(input: { id: string; title?: string; status?: string; days: any[] }) {
   if (!isDate(input.id)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
   const old = await getWeek(input.id);
@@ -142,6 +176,7 @@ export async function putWeekFromClaude(input: { id: string; title?: string; sta
     updatedAt: new Date().toISOString(),
   };
   await menuStore().setJSON(`weeks/${week.id}`, week);
+  await importRatings(week.id, input.days ?? []);
   return { week, keptOwnerDays: kept };
 }
 
@@ -180,6 +215,37 @@ export async function putOwnFeedback(person: string, weekId: string, date: strin
   else f.items[date] = { comment: text, rating: r, updatedAt: new Date().toISOString() };
   await menuStore().setJSON(key, f);
   return f;
+}
+
+// ---------- guest ratings ----------
+export async function getGuestFeedback(weekId: string): Promise<GuestFeedback> {
+  return ((await menuStore().get(`guest/${weekId}`, { type: "json" })) as GuestFeedback | null) ?? { items: {} };
+}
+
+/** How many ratings the guest account may still give in the current 24 hours. */
+export async function guestQuotaLeft(): Promise<number> {
+  const log = ((await menuStore().get("guest/quota", { type: "json" })) as string[] | null) ?? [];
+  return Math.max(0, GUEST_PER_DAY - log.filter((t) => Date.now() - Date.parse(t) < 864e5).length);
+}
+
+export async function putGuestRating(weekId: string, date: string, rating: unknown, comment: unknown) {
+  if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
+  if (date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
+  const r = Number(rating);
+  if (!(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Kies een cijfer van 1 t/m 10");
+  const s = menuStore();
+  const log = (((await s.get("guest/quota", { type: "json" })) as string[] | null) ?? []).filter((t) => Date.now() - Date.parse(t) < 864e5);
+  if (log.length >= GUEST_PER_DAY) throw new Error(`Als gast kun je ${GUEST_PER_DAY} cijfers per dag geven. Morgen kan het weer.`);
+  const week = await getWeek(weekId);
+  const day = week?.days.find((d) => d.date === date);
+  if (!day || !day.dish || day.away) throw new Error("Dit gerecht bestaat niet");
+  const g = await getGuestFeedback(weekId);
+  (g.items[date] ??= []).push({ rating: r, comment: clip(comment, 1000).trim(), at: new Date().toISOString() });
+  g.items[date] = g.items[date].slice(-20);
+  await s.setJSON(`guest/${weekId}`, g);
+  log.push(new Date().toISOString());
+  await s.setJSON("guest/quota", log);
+  return g;
 }
 
 /** Today's date in the Netherlands. */

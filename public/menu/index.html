@@ -80,7 +80,28 @@
   .wkc { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
   .wkc h3 { font: 400 1.1rem/1.3 var(--serif); text-align: center; margin: 0 0 12px; }
 
-  .login { max-width: 360px; margin: 12vh auto 0; }
+  .scores { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px 18px; margin: 16px 0 4px; }
+  .scores div { min-width: 46px; }
+  .scores small { display: block; color: var(--muted); font-size: .78rem; }
+  .scores span { font: 400 1.35rem/1.2 var(--serif); }
+  .scores .none { color: var(--line); }
+  .scores .guest small { color: var(--brass); }
+  .avg { color: var(--muted); font-size: .85rem; margin: 0; }
+  .notes-list { list-style: none; margin: 10px auto 0; padding: 0; max-width: 460px; text-align: left; font-size: .93rem; }
+  .notes-list li { padding: 4px 0; }
+  .notes-list b { font-weight: 600; margin-right: 6px; }
+  .mine { text-align: left; max-width: 460px; margin: 14px auto 0; }
+  .mine .rating { margin-bottom: 8px; }
+  .mine textarea { min-height: 52px; }
+  .mine .row { margin-top: 8px; }
+  .quota { color: var(--muted); font-size: .85rem; text-align: center; margin: 0 0 12px; }
+
+  .login { max-width: 380px; margin: 10vh auto 0; }
+  .who-row { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .who-row:last-of-type { border-bottom: 0; }
+  .who-row label { font: 400 1.15rem/1.2 var(--serif); }
+  .who-row input { text-align: center; letter-spacing: .3em; }
+  .guest-btn { width: 100%; margin-top: 18px; }
   .login .card { padding: 36px 24px; }
   .login h1 { font: 400 1.9rem/1.1 var(--serif); text-align: center; margin: 0 0 6px; }
   .login .btn { width: 100%; margin-top: 18px; }
@@ -92,9 +113,9 @@
 <div id="app" class="wrap" aria-live="polite"></div>
 <script>
 const app = document.getElementById("app");
-let S = null;            // state from the server
-let selected = null;     // selected week id
-let open = {};           // which panels are open: { "<date>:fb" | "<date>:edit": true }
+let S = null;          // state from the server
+let selected = null;   // selected week id
+let editing = {};      // owner edit panels: { "<date>": true }
 
 const MONTHS = ["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"];
 const DAYS = ["zondag","maandag","dinsdag","woensdag","donderdag","vrijdag","zaterdag"];
@@ -107,6 +128,7 @@ const shortRange = (w) => {
     ? `${a.getDate()}–${b.getDate()} ${MONTHS[a.getMonth()].slice(0,3)}`
     : `${a.getDate()} ${MONTHS[a.getMonth()].slice(0,3)} – ${b.getDate()} ${MONTHS[b.getMonth()].slice(0,3)}`;
 };
+const nl = (n) => String(Math.round(n * 10) / 10).replace(".", ",");
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -139,94 +161,112 @@ async function load() {
   }
 }
 
-function renderLogin(msg) {
-  const name = el("input", { type: "text", id: "name", autocomplete: "username", autocapitalize: "words" });
-  const pin = el("input", { type: "password", id: "pin", inputmode: "numeric", autocomplete: "current-password", maxlength: "8" });
-  const error = el("p", { class: "err", role: "alert" }, msg || "");
-  const form = el("form", { onsubmit: async (ev) => {
-      ev.preventDefault();
-      error.textContent = "";
-      try { await api("login", { name: name.value, pin: pin.value }); await load(); }
-      catch (e) { error.textContent = e.message; pin.value = ""; pin.focus(); }
-    } },
-    el("label", { class: "f", for: "name" }, "Voornaam"), name,
-    el("label", { class: "f", for: "pin" }, "Pincode"), pin,
-    el("button", { class: "btn", type: "submit" }, "Inloggen"), error);
+// ---------- login: names under each other, PIN next to your name ----------
+async function renderLogin() {
+  let people = [];
+  try { people = (await api("people")).people; } catch {}
+  const error = el("p", { class: "err", role: "alert" });
+  const login = async (name, input) => {
+    error.textContent = "";
+    try { await api("login", { name, pin: input.value }); await load(); }
+    catch (e) { error.textContent = `${name}: ${e.message}`; input.value = ""; input.focus(); }
+  };
+  const rows = people.map((name) => {
+    const id = "pin-" + name.toLowerCase();
+    const input = el("input", { id, type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", "aria-label": "Pincode " + name });
+    input.addEventListener("input", () => { if (/^\d{4}$/.test(input.value)) login(name, input); });
+    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") login(name, input); });
+    return el("div", { class: "who-row" }, el("label", { for: id }, name), input);
+  });
   app.replaceChildren(el("div", { class: "login" }, el("div", { class: "card" },
-    el("h1", {}, "Ons menu"), el("p", { class: "sub" }, "Log in met je voornaam en pincode"), el("div", { class: "ornament" }), form)));
-  name.focus();
+    el("h1", {}, "Ons menu"), el("p", { class: "sub" }, "Vul je pincode in naast je naam"), el("div", { class: "ornament" }),
+    el("div", { style: "margin-top:14px" }, rows), error,
+    el("button", { class: "btn ghost guest-btn", onclick: async () => { try { await api("guest", {}); await load(); } catch (e) { error.textContent = e.message; } } }, "Doorgaan als gast"))));
 }
 
+// ---------- the menu ----------
 function render() {
   const header = el("header", {},
     el("h1", {}, "Ons menu"),
     el("span", { class: "who" }, S.me, "  ", el("button", { class: "link", onclick: async () => { await api("logout", {}); S = null; renderLogin(); } }, "Uitloggen")));
-
   if (!S.weeks.length) {
     app.replaceChildren(header, el("div", { class: "card" }, el("p", { class: "empty-state" }, "Er staat nog geen menu klaar. Het nieuwe voorstel verschijnt donderdag.")));
     return;
   }
   const tabs = el("nav", { class: "weeks", "aria-label": "Weken" },
-    S.weeks.map(({ week }) => el("button", { "aria-pressed": String(week.id === selected), onclick: () => { selected = week.id; open = {}; render(); } }, shortRange(week))));
-  const { week, feedback } = S.weeks.find((w) => w.week.id === selected);
-  const future = week.days[0] && week.days[0].date > S.today;
-
+    S.weeks.map(({ week }) => el("button", { "aria-pressed": String(week.id === selected), onclick: () => { selected = week.id; editing = {}; render(); } }, shortRange(week))));
+  const W = S.weeks.find((w) => w.week.id === selected);
+  const future = W.week.days[0] && W.week.days[0].date > S.today;
   const card = el("section", { class: "card" },
-    el("h2", {}, week.title),
-    el("p", { class: "sub" }, future ? "Voorstel — laat weten wat je ervan vindt" : week.days.some((x) => x.date <= S.today) ? "Geef de gerechten een cijfer" : ""),
+    el("h2", {}, W.week.title),
+    el("p", { class: "sub" }, future ? "Voorstel" : ""),
     el("div", { class: "ornament" }),
-    week.days.map((day) => renderDay(week, day, feedback)),
-    renderWeekComment(week, feedback));
+    S.isGuest && el("p", { class: "quota", style: "margin-top:14px" }, S.guestLeft ? `Je kunt vandaag nog ${S.guestLeft} ${S.guestLeft === 1 ? "cijfer" : "cijfers"} geven` : "Je hebt vandaag je cijfers al gegeven"),
+    W.week.days.map((day) => renderDay(W, day)),
+    renderWeekComment(W));
   app.replaceChildren(header, tabs, card);
   requestAnimationFrame(() => tabs.querySelector('[aria-pressed="true"]')?.scrollIntoView({ inline: "center", block: "nearest" }));
 }
 
-function renderDay(week, day, feedback) {
+function renderDay(W, day) {
+  const { week, feedback, guest } = W;
   const eaten = day.date <= S.today;
-  const others = Object.entries(feedback).filter(([p]) => p !== S.me).map(([p, f]) => [p, f.items?.[day.date]]).filter(([, i]) => i && (i.comment || i.rating));
-  const mine = feedback[S.me]?.items?.[day.date];
-  const fbKey = day.date + ":fb", editKey = day.date + ":edit";
+  const hasMeal = day.dish && !day.away;
+  const items = S.people.map((p) => [p, feedback[p]?.items?.[day.date]]);
+  const guestList = guest?.items?.[day.date] ?? [];
 
-  const meta = el("div", { class: "meta" },
-    day.recipeUrl && el("a", { href: day.recipeUrl, target: "_blank", rel: "noopener" }, "Recept"),
-    !day.away && day.dish && el("button", { "aria-expanded": String(!!open[fbKey]), onclick: () => { open[fbKey] = !open[fbKey]; render(); } },
-      eaten ? `Cijfers${others.length ? " (" + others.length + ")" : ""}` : `Reacties${others.length ? " (" + others.length + ")" : ""}`),
-    S.isOwner && el("button", { "aria-expanded": String(!!open[editKey]), onclick: () => { open[editKey] = !open[editKey]; render(); } }, "Aanpassen"));
+  let scores = null, avg = null;
+  if (hasMeal && eaten) {
+    const cells = items.map(([p, i]) => el("div", {}, el("small", {}, p), el("span", { class: i?.rating ? "" : "none" }, i?.rating ?? "–")));
+    const gAvg = guestList.length ? guestList.reduce((a, g) => a + g.rating, 0) / guestList.length : null;
+    if (gAvg !== null) cells.push(el("div", { class: "guest" }, el("small", {}, guestList.length > 1 ? `Gast (${guestList.length}×)` : "Gast"), el("span", {}, nl(gAvg))));
+    scores = el("div", { class: "scores" }, cells);
+    const all = [...items.map(([, i]) => i?.rating).filter(Boolean), ...guestList.map((g) => g.rating)];
+    if (all.length > 1) avg = el("p", { class: "avg" }, "Gemiddeld " + nl(all.reduce((a, b) => a + b, 0) / all.length));
+  }
+  const notes = [
+    ...items.filter(([p, i]) => i?.comment && p !== S.me).map(([p, i]) => el("li", {}, el("b", {}, p), i.comment)),
+    ...guestList.filter((g) => g.comment).map((g) => el("li", {}, el("b", {}, "Gast"), g.comment)),
+  ];
 
   return el("article", { class: "day" },
     el("div", { class: "dayname" }, longDate(day.date)),
-    el("div", { class: "dish" + (day.dish && !day.away ? "" : " empty") }, day.away ? "Niet thuis" : day.dish || "Nog niet ingevuld"),
+    el("div", { class: "dish" + (hasMeal ? "" : " empty") }, day.away ? "Niet thuis" : day.dish || "Nog niet ingevuld"),
     day.notes && el("p", { class: "notes" }, day.notes),
     day.editedBy === "owner" && el("span", { class: "owner-mark" }, "Aangepast door " + S.owner),
     (day.ingredients || day.picnic) && el("details", { class: "ingr" }, el("summary", {}, "Ingrediënten"),
       day.ingredients && el("p", {}, day.ingredients), day.picnic && el("p", { class: "muted" }, day.picnic)),
-    meta,
-    open[fbKey] && renderFeedback(week, day, others, mine, eaten),
-    open[editKey] && renderEdit(week, day));
+    (day.recipeUrl || S.isOwner) && el("div", { class: "meta" },
+      day.recipeUrl && el("a", { href: day.recipeUrl, target: "_blank", rel: "noopener" }, "Recept"),
+      S.isOwner && el("button", { "aria-expanded": String(!!editing[day.date]), onclick: () => { editing[day.date] = !editing[day.date]; render(); } }, "Aanpassen")),
+    editing[day.date] && renderEdit(week, day),
+    scores, avg,
+    notes.length ? el("ul", { class: "notes-list" }, notes) : null,
+    hasMeal && renderMine(W, day, eaten));
 }
 
-function renderFeedback(week, day, others, mine, eaten) {
+function renderMine(W, day, eaten) {
+  if (S.isGuest && (!eaten || !S.guestLeft)) return null;
+  const mine = S.isGuest ? null : W.feedback[S.me]?.items?.[day.date];
   let rating = mine?.rating ?? null;
-  const comment = el("textarea", { id: "c" + day.date, maxlength: "1000" }, mine?.comment || "");
+  const id = "c" + day.date;
+  const comment = el("textarea", { id, maxlength: "1000", placeholder: eaten ? "Toelichting" : "Reactie", "aria-label": eaten ? "Toelichting" : "Reactie" }, mine?.comment || "");
   const status = el("span", { role: "status" });
-  const scale = eaten && el("div", { class: "rating", role: "group", "aria-label": "Cijfer" },
+  const scale = eaten && el("div", { class: "rating", role: "group", "aria-label": "Jouw cijfer" },
     Array.from({ length: 10 }, (_, i) => el("button", { type: "button", "aria-pressed": String(rating === i + 1),
       onclick: (ev) => { rating = rating === i + 1 ? null : i + 1;
         [...ev.currentTarget.parentNode.children].forEach((b, j) => b.setAttribute("aria-pressed", String(rating === j + 1))); } }, i + 1)));
-  return el("div", { class: "panel" },
-    others.length ? el("ul", { class: "others" }, others.map(([p, i]) =>
-      el("li", {}, el("b", {}, p), i.rating ? el("span", { class: "score" }, i.rating) : null, i.comment ? el("div", {}, i.comment) : null))) : null,
-    el("h3", {}, eaten ? "Jouw cijfer" : "Jouw reactie"),
-    scale,
-    el("label", { class: "f", for: "c" + day.date }, eaten ? "Toelichting" : "Reactie"),
-    comment,
-    el("div", { class: "row" },
-      el("button", { class: "btn", onclick: async () => {
-        status.className = ""; status.textContent = "";
-        try { await api("feedback", { weekId: week.id, date: day.date, comment: comment.value, rating });
-          status.className = "saved"; status.textContent = "Opgeslagen"; const keep = { ...open }; await load(); open = keep; render(); }
-        catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
-      status));
+  const save = async () => {
+    status.className = ""; status.textContent = "";
+    try {
+      const r = await api("feedback", { weekId: W.week.id, date: day.date, comment: comment.value, rating });
+      if (S.isGuest) { W.guest = r.guest; S.guestLeft = r.guestLeft; }
+      else W.feedback[S.me] = r.feedback;
+      render(); // show the new score straight away
+    } catch (e) { status.className = "err"; status.textContent = e.message; }
+  };
+  return el("div", { class: "mine" }, scale, comment,
+    el("div", { class: "row" }, el("button", { class: "btn", onclick: save }, "Opslaan"), status));
 }
 
 function renderEdit(week, day) {
@@ -242,29 +282,29 @@ function renderEdit(week, day) {
       el("button", { class: "btn", onclick: async () => {
         const v = (id) => panel.querySelector("#" + id).value;
         try { await api("day", { weekId: week.id, day: { date: day.date, dish: v("e-dish"), ingredients: v("e-ingr"), notes: v("e-notes"), recipeUrl: v("e-url"), away: away.checked } });
-          open[day.date + ":edit"] = false; await load(); }
+          editing[day.date] = false; await load(); }
         catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
-      el("button", { class: "btn ghost", onclick: () => { open[day.date + ":edit"] = false; render(); } }, "Annuleren"),
+      el("button", { class: "btn ghost", onclick: () => { editing[day.date] = false; render(); } }, "Annuleren"),
       status));
   return panel;
 }
 
-function renderWeekComment(week, feedback) {
-  const firstDay = week.days[0]?.date || week.id;
-  if (firstDay <= S.today) return null; // reactions on the menu as a whole: only for the proposal
-  const list = Object.entries(feedback).filter(([p, f]) => p !== S.me && f.items?.week?.comment).map(([p, f]) =>
-    el("li", {}, el("b", {}, p), el("div", { style: "white-space:pre-line" }, f.items.week.comment)));
-  const mine = el("textarea", { id: "c-week", maxlength: "1000" }, feedback[S.me]?.items?.week?.comment || "");
+function renderWeekComment(W) {
+  const firstDay = W.week.days[0]?.date || W.week.id;
+  if (firstDay <= S.today || S.isGuest) return null; // reactions on the menu as a whole: only for the proposal
+  const list = S.people.filter((p) => p !== S.me && W.feedback[p]?.items?.week?.comment).map((p) =>
+    el("li", {}, el("b", {}, p), W.feedback[p].items.week.comment));
+  const mine = el("textarea", { id: "c-week", maxlength: "1000", placeholder: "Reactie", "aria-label": "Reactie op dit menu" }, W.feedback[S.me]?.items?.week?.comment || "");
   const status = el("span", { role: "status" });
   return el("div", { class: "wkc" },
     el("h3", {}, "Reacties op dit menu"),
-    list.length ? el("ul", { class: "others" }, list) : null,
-    el("label", { class: "f", for: "c-week" }, "Jouw reactie"), mine,
-    el("div", { class: "row" },
-      el("button", { class: "btn", onclick: async () => {
-        try { await api("feedback", { weekId: week.id, date: "week", comment: mine.value, rating: null }); status.className = "saved"; status.textContent = "Opgeslagen"; await load(); }
-        catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
-      status));
+    list.length ? el("ul", { class: "notes-list" }, list) : null,
+    el("div", { class: "mine" }, mine,
+      el("div", { class: "row" },
+        el("button", { class: "btn", onclick: async () => {
+          try { const r = await api("feedback", { weekId: W.week.id, date: "week", comment: mine.value, rating: null }); W.feedback[S.me] = r.feedback; render(); }
+          catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
+        status)));
 }
 
 load();
