@@ -1,6 +1,7 @@
 /**
- * MCP tools for the family menu website, so Claude's scheduled tasks can publish the menu
- * and read the family's feedback and ratings. These do not need the Picnic login.
+ * MCP tools for the family menu website, so Claude's scheduled tasks can publish the menu, plan the standard
+ * groceries and read the family's reactions. The data lives in the Notion databases on the page "Weekmenu"
+ * (see menu.mts); these tools do not need the Picnic login.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -21,102 +22,89 @@ async function run(tool: string, args: unknown, fn: () => Promise<unknown>): Pro
 }
 
 const weekId = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("Week-id = de vrijdag waarmee de week begint, JJJJ-MM-DD");
-const PROCESSED_KEY = "meta/ratingsProcessedAt";
+const consumer = z
+  .enum(["menu", "ratings"])
+  .default("ratings")
+  .describe("'menu' = het uurlijkse verwerken van reacties in het voorstel; 'ratings' = cijfers verwerken in het gerechtenoverzicht. Elk heeft een eigen markering.");
+// Tool calls must finish well within Netlify's function time limit; longer work is reported as not done.
+const deadline = () => Date.now() + 7000;
 
 export function registerMenuTools(server: McpServer) {
   server.tool(
     "menu_list_weeks",
-    "Lijst van de weken op de gezinsmenu-website (id = vrijdag, titel, status). Alleen lezen.",
-    {},
-    async () => run("menu_list_weeks", {}, async () => {
-      const ids = await M.listWeekIds();
-      const weeks = await Promise.all(ids.slice(-20).map((id) => M.getWeek(id)));
-      return { today: M.today(), weeks: weeks.filter(Boolean).map((w) => ({ id: w!.id, title: w!.title, status: w!.status, updatedAt: w!.updatedAt })) };
+    "Lijst van de weken in de Notion-database Weekmenu (id = vrijdag, titel, status, aantal dagen). Alleen lezen.",
+    { from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Vanaf deze datum (standaard 10 weken terug)") },
+    async ({ from }) => run("menu_list_weeks", { from }, async () => {
+      const weeks = await M.loadWeeks({ from: from ?? M.addDays(M.today(), -70) });
+      return { today: M.today(), weeks: weeks.map((w) => ({ id: w.week.id, title: w.week.title, status: w.week.status, days: w.week.days.length, updatedAt: w.week.updatedAt })) };
     }),
   );
 
   server.tool(
     "menu_get_week",
-    "Eén week van de gezinsmenu-website met alle dagen en per persoon de feedback en cijfers per dag (sleutel 'week' = reactie op het hele menu). Lees alle reacties: vraagt iemand om iets extra's (bijv. 'graag ook aardbeienyoghurt'), neem dat mee in de boodschappen. editedBy='owner' betekent dat de eigenaar (Johan) die dag zelf heeft aangepast: dat is leidend. Alleen lezen.",
+    "Eén week met alle dagen, per persoon de cijfers en reacties per dag (sleutel 'week' = reactie op het hele menu), gastcijfers en de standaard boodschappen (status gepland/voorstel/goedgekeurd/afgewezen). editedBy='owner' = de eigenaar (Johan) heeft die dag zelf aangepast: dat is leidend. Bestellen: boodschappen met status gepland of goedgekeurd; voorstel = nog niet goedgekeurd, afgewezen = niet bestellen. Alleen lezen.",
     { week_id: weekId },
-    async ({ week_id }) => run("menu_get_week", { week_id }, async () => ({
-      owner: M.owner(),
-      week: await M.getWeek(week_id),
-      feedback: await M.getFeedback(week_id),
-      guest: await M.getGuestFeedback(week_id),
-    })),
+    async ({ week_id }) => run("menu_get_week", { week_id }, async () => ({ owner: M.owner(), today: M.today(), ...(await M.getWeek(week_id)) })),
   );
 
   server.tool(
     "menu_put_week",
-    "Zet een week (voorstel of bijgewerkt menu) op de gezinsmenu-website. Dagen die de eigenaar zelf op de website heeft aangepast worden NIET overschreven (alleen hun Picnic-producten mogen worden bijgewerkt); het antwoord noemt die dagen in keptOwnerDays.",
+    "Zet een week (voorstel of bijgewerkt menu) in de Notion-database en dus op de gezinsmenu-website. Dagen die de eigenaar zelf heeft aangepast worden NIET overschreven (alleen hun Picnic-producten, status en Claude-notitie mogen worden bijgewerkt); het antwoord noemt die dagen in keptOwnerDays. notSaved = dagen die nog niet zijn opgeslagen (roep dan opnieuw aan met alleen die dagen).",
     {
       week_id: weekId,
-      title: z.string().max(120).describe("Bijv. 'Week 47-48 (vr 20 – do 26 nov)'"),
-      status: z.string().max(40).optional().describe("Bijv. 'voorstel' of 'in winkelmand'"),
+      title: z.string().max(120).optional().describe("Bijv. 'Week 47-48 (vr 20 – do 26 nov)'"),
+      status: z.enum(["voorstel", "in winkelmand", "gegeten"]).optional(),
+      delivery: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Bezorgdatum (donderdag)"),
+      note: z.string().max(2000).optional().describe("Claude-notitie bij de hele week"),
       days: z
         .array(
           z.object({
             date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
             dish: z.string().max(200).default(""),
             ingredients: z.string().max(2000).default("").describe("Algemene ingrediënten (kolom Boodschappen)"),
-            picnic: z.string().max(3000).default("").describe("Exacte Picnic-producten"),
+            picnic: z.string().max(4000).default("").describe("Exacte Picnic-producten"),
             notes: z.string().max(500).default("").describe("Bijzonderheden"),
             recipeUrl: z.string().max(500).default(""),
             away: z.boolean().default(false).describe("true = niet thuis eten"),
+            claudeNote: z.string().max(1000).optional().describe("Korte uitleg voor het gezin als je iets hebt aangepast na een reactie, bijv. 'Zalm in plaats van kabeljauw (reactie Laura)'. Leeg = notitie weghalen."),
             ratings: z
               .record(z.object({ rating: z.coerce.number().int().min(1).max(10).nullable().default(null), comment: z.string().max(1000).default("") }))
               .optional()
-              .describe("Alleen bij het overzetten van oude weken: bestaande cijfers uit Notion per persoon, bijv. {\"Johan\": {\"rating\": 8, \"comment\": \"\"}}. Overschrijft nooit wat iemand op de website invulde."),
+              .describe("Alleen bij het overzetten van oude weken: bestaande cijfers per persoon. Vult alleen lege cellen."),
           }),
         )
         .min(1)
         .max(7),
     },
-    async (args) => run("menu_put_week", { week_id: args.week_id, days: args.days.length }, async () => {
-      const { week, keptOwnerDays } = await M.putWeekFromClaude({ id: args.week_id, title: args.title, status: args.status, days: args.days });
-      return { saved: week.id, days: week.days.length, keptOwnerDays };
-    }),
+    async (args) => run("menu_put_week", { week_id: args.week_id, days: args.days.length }, () =>
+      M.putWeekFromClaude({ id: args.week_id, title: args.title, status: args.status, delivery: args.delivery, note: args.note, days: args.days, deadline: deadline() }),
+    ),
   );
 
   server.tool(
-    "menu_get_new_ratings",
-    "Alle cijfers en opmerkingen van het gezin (en van gasten, person 'Gast') die zijn ingevuld of gewijzigd na de laatst verwerkte keer (of na 'since'), met week, dag, gerecht en persoon. Gebruik daarna menu_mark_ratings_processed. Alleen lezen.",
-    { since: z.string().optional().describe("ISO-tijdstip; standaard het moment van de vorige verwerking") },
-    async ({ since }) => run("menu_get_new_ratings", { since }, async () => {
-      const from = since ?? ((await M.menuStore().get(PROCESSED_KEY, { type: "text" })) || "1970-01-01T00:00:00Z");
-      const out: any[] = [];
-      for (const id of await M.listWeekIds()) {
-        const week = await M.getWeek(id);
-        const fb = await M.getFeedback(id);
-        for (const [date, list] of Object.entries((await M.getGuestFeedback(id)).items)) {
-          for (const g of list) {
-            if (g.at > from) {
-              const day = week?.days.find((d) => d.date === date);
-              out.push({ week: id, date, day: M.dayName(date), dish: day?.dish ?? "", person: M.GUEST, rating: g.rating, comment: g.comment, updatedAt: g.at });
-            }
-          }
-        }
-        for (const [person, f] of Object.entries(fb)) {
-          for (const [date, item] of Object.entries(f.items)) {
-            if (item.updatedAt > from && item.source !== "notion") {
-              const day = week?.days.find((d) => d.date === date);
-              out.push({ week: id, date, day: date === "week" ? "hele menu" : M.dayName(date), dish: day?.dish ?? "", person, rating: item.rating, comment: item.comment, updatedAt: item.updatedAt });
-            }
-          }
-        }
-      }
-      return { since: from, now: new Date().toISOString(), items: out.sort((a, b) => a.date.localeCompare(b.date)) };
-    }),
+    "menu_put_groceries",
+    "Zet de geplande standaard boodschappen van een week (onder het menu op de website, status 'gepland'). Bestaande regels met dezelfde productnaam worden bijgewerkt; een product dat de eigenaar heeft afgewezen blijft afgewezen. Met replace=true verdwijnen jouw eerder geplande producten die niet meer in de lijst staan. Suggesties van het gezin worden nooit aangeraakt. notDone > 0: roep opnieuw aan.",
+    {
+      week_id: weekId,
+      items: z
+        .array(z.object({ product: z.string().min(1).max(120).describe("Korte naam, bijv. 'Halfvolle melk'"), amount: z.coerce.number().int().min(1).max(50).nullable().default(null), picnic: z.string().max(500).default("").describe("Exact Picnic-product") }))
+        .max(80),
+      replace: z.boolean().default(true),
+    },
+    async ({ week_id, items, replace }) => run("menu_put_groceries", { week_id, items: items.length }, () => M.putGroceriesFromClaude(week_id, items, replace, deadline())),
   );
 
   server.tool(
-    "menu_mark_ratings_processed",
-    "Legt vast tot welk moment de cijfers en opmerkingen in Notion zijn verwerkt (gebruik 'now' uit menu_get_new_ratings).",
-    { until: z.string().min(10).describe("ISO-tijdstip") },
-    async ({ until }) => run("menu_mark_ratings_processed", { until }, async () => {
-      await M.menuStore().set(PROCESSED_KEY, until);
-      return { processedUntil: until };
-    }),
+    "menu_get_updates",
+    "Alles wat het gezin (en gasten, person 'Gast') op de website heeft ingevuld of gewijzigd na de laatst verwerkte keer voor deze verwerker: cijfers, reacties per dag of op het hele menu (day 'hele menu'), suggesties voor boodschappen en aanpassingen door de eigenaar (kind 'owner-edit'). Leeg = niets nieuws. Sluit af met menu_mark_updates_processed met 'now'. Alleen lezen.",
+    { consumer, since: z.string().optional().describe("ISO-tijdstip; standaard het moment van de vorige verwerking") },
+    async ({ consumer, since }) => run("menu_get_updates", { consumer, since }, () => M.getUpdates(consumer, since)),
+  );
+
+  server.tool(
+    "menu_mark_updates_processed",
+    "Legt vast tot welk moment de updates voor deze verwerker zijn verwerkt (gebruik 'now' uit menu_get_updates).",
+    { consumer, until: z.string().min(10).describe("ISO-tijdstip") },
+    async ({ consumer, until }) => run("menu_mark_updates_processed", { consumer, until }, () => M.markProcessed(consumer, until)),
   );
 }

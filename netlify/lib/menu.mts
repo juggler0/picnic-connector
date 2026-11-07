@@ -1,17 +1,25 @@
 /**
  * Family menu website: storage, users and sessions.
  *
- * Data lives in Netlify Blobs (store "menu"):
- *   weeks/<friday-date>                 the menu of one week (Friday to Thursday)
- *   feedback/<friday-date>/<person>     one person's feedback and ratings for that week
- *   auth/fails/<person>                 failed login attempts (brief lockout)
- *   meta/ratingsProcessedAt             until when Claude processed ratings into Notion
+ * The menu itself lives in three Notion databases on the page "Weekmenu" (found by title, created if missing):
+ *   Weekmenu-dagen          one row per day: dish, ingredients, Picnic products, everyone's rating and reaction
+ *   Weekmenu-weken          one row per week: title, status, reactions on the menu as a whole
+ *   Weekmenu-boodschappen   standard groceries per week (planned by Claude) and suggestions from the family
+ * Every "Opslaan" on the website writes to Notion straight away (NOTION_TOKEN).
+ *
+ * Small things stay in Netlify Blobs (store "menu"):
+ *   auth/fails/<person>     failed login attempts (brief lockout)
+ *   guest/<friday-date>     individual guest ratings (Notion gets the average)
+ *   guest/quota             when the guest account gave its last ratings
+ *   events/<time>           change log, so Claude can see what is new since it last looked
+ *   meta/*                  cached database ids, processing markers, migration state
  *
  * Users come from the MENU_USERS env var, e.g. "Johan:1234,Andrea:5678,Laura:1111,Merle:2222".
- * The first name (or MENU_OWNER) is the owner: the only one who may change dishes and ingredients.
+ * The first name (or MENU_OWNER) is the owner: the only one who may change dishes and approve groceries.
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getStore } from "@netlify/blobs";
+import * as N from "./notion.mts";
 
 export const menuStore = () => getStore({ name: "menu", consistency: "strong" });
 
@@ -25,18 +33,29 @@ export type Day = {
   recipeUrl: string;
   away: boolean; // nobody eats at home
   editedBy: "claude" | "owner";
+  claudeNote: string; // what Claude changed after a reaction
   editedAt: string;
 };
-export type Week = { id: string; title: string; status: string; days: Day[]; updatedAt: string };
-export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string; source?: "notion" };
-export type GuestItem = { rating: number; comment: string; at: string };
-export type GuestFeedback = { items: Record<string, GuestItem[]> };
+export type Week = { id: string; title: string; status: string; delivery: string; days: Day[]; updatedAt: string };
+export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string };
 export type PersonFeedback = { person: string; items: Record<string, FeedbackItem> }; // key = date, or "week" for the menu as a whole
+export type GuestItem = { rating: number; comment: string; at: string; sid?: string; mine?: boolean };
+export type GuestFeedback = { items: Record<string, GuestItem[]> };
+export type Grocery = { id: string; product: string; amount: number | null; picnic: string; status: string; by: string };
+export type MenuEvent = {
+  at: string; kind: "feedback" | "guest" | "suggestion" | "owner-edit"; week: string; date?: string; day?: string;
+  dish?: string; person: string; rating?: number | null; comment?: string; product?: string;
+};
 
 const DAY_NAMES = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
 export const dayName = (date: string) => DAY_NAMES[new Date(date + "T12:00:00Z").getUTCDay()];
 export const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const clip = (s: unknown, n: number) => (typeof s === "string" ? s.slice(0, n) : "");
+export const addDays = (date: string, n: number) => new Date(Date.parse(date + "T12:00:00Z") + n * 864e5).toISOString().slice(0, 10);
+/** The Friday on or before a date: the id of the menu week it belongs to. */
+export const weekIdFor = (date: string) => addDays(date, -((new Date(date + "T12:00:00Z").getUTCDay() + 2) % 7));
+/** Today's date in the Netherlands. */
+export const today = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Amsterdam" });
 
 // ---------- users ----------
 export function users(): { name: string; pin: string }[] {
@@ -71,15 +90,21 @@ export function makeSession(name: string, days = SESSION_DAYS) {
   const payload = `${Buffer.from(name).toString("base64url")}.${Date.now() + days * 864e5}`;
   return `${payload}.${sign(payload)}`;
 }
-export function readSession(req: Request): string | null {
+function sessionParts(req: Request) {
   const m = (req.headers.get("cookie") ?? "").match(/(?:^|;\s*)menu_session=([^;]+)/);
   if (!m || !(Netlify.env.get("CONNECTOR_SECRET")?.length ?? 0)) return null;
   const [n, exp, sig] = m[1].split(".");
   if (!n || !exp || !sig || !eq(sig, sign(`${n}.${exp}`)) || Number(exp) < Date.now()) return null;
-  const name = Buffer.from(n, "base64url").toString();
-  if (name === GUEST) return GUEST;
-  return findUser(name)?.name ?? null; // a removed user is logged out
+  return { name: Buffer.from(n, "base64url").toString(), sig };
 }
+export function readSession(req: Request): string | null {
+  const s = sessionParts(req);
+  if (!s) return null;
+  if (s.name === GUEST) return GUEST;
+  return findUser(s.name)?.name ?? null; // a removed user is logged out
+}
+/** Identifies one guest session, so a guest who rates the same dish again updates their own rating. */
+export const guestSessionId = (req: Request) => sessionParts(req)?.sig.slice(0, 16) ?? "";
 export const sessionCookie = (value: string, maxAgeDays = SESSION_DAYS) =>
   `menu_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${Math.round(maxAgeDays * 86400)}`;
 
@@ -101,152 +126,555 @@ export async function checkLogin(name: string, pin: string): Promise<{ ok: true;
   return { ok: true, name: user.name };
 }
 
-// ---------- weeks ----------
-export async function getWeek(id: string): Promise<Week | null> {
-  return (await menuStore().get(`weeks/${id}`, { type: "json" })) as Week | null;
-}
-export async function listWeekIds(): Promise<string[]> {
-  const { blobs } = await menuStore().list({ prefix: "weeks/" });
-  return blobs.map((b) => b.key.slice(6)).filter(isDate).sort();
-}
+// ---------- Notion databases ----------
+const TITLES = { days: "Weekmenu-dagen", weeks: "Weekmenu-weken", groceries: "Weekmenu-boodschappen" } as const;
+type DbKey = keyof typeof TITLES;
+type Dbs = Record<DbKey, string> & { schemaFor: string };
+const DB_KEY = "meta/notionDbs";
+const ownerEditProp = () => `Aangepast door ${owner()}`;
+const reactionProp = (person: string) => `Reactie ${person}`;
+export const DAY_STATUS = ["voorstel", "in winkelmand", "gegeten"];
+export const GROCERY_STATUS = ["gepland", "voorstel", "goedgekeurd", "afgewezen"];
 
-const cleanDay = (d: any, editedBy: Day["editedBy"]): Day => ({
-  date: d.date,
-  dish: clip(d.dish, 200),
-  ingredients: clip(d.ingredients, 2000),
-  picnic: clip(d.picnic, 3000),
-  notes: clip(d.notes, 500),
-  recipeUrl: /^https?:\/\//.test(d.recipeUrl ?? "") ? clip(d.recipeUrl, 500) : "",
-  away: Boolean(d.away),
-  editedBy,
-  editedAt: new Date().toISOString(),
-});
-
-/**
- * Claude writes a week. Days the owner edited on the website keep the owner's dish, ingredients,
- * notes, recipe and "away"; Claude may still update the Picnic products of those days.
- */
-/**
- * Ratings that already exist in Notion (columns J/A/L/M) can be passed along per day as
- * ratings: { "Johan": {rating, comment}, ... }. They are stored as that person's feedback with source "notion",
- * but never overwrite what the person entered on the website, and are not reported as "new" to Claude.
- */
-async function importRatings(weekId: string, days: any[]) {
+function schema(key: DbKey): Record<string, unknown> {
   const people = users().map((u) => u.name);
-  for (const person of people) {
-    const key = `feedback/${weekId}/${person.toLowerCase()}`;
-    let f = (await menuStore().get(key, { type: "json" })) as PersonFeedback | null;
-    let changed = false;
-    for (const d of days) {
-      const r = d?.ratings?.[person];
-      if (!r || !isDate(d.date)) continue;
-      f ??= { person, items: {} };
-      const existing = f.items[d.date];
-      if (existing && existing.source !== "notion") continue;
-      const rating = Number.isInteger(r.rating) && r.rating >= 1 && r.rating <= 10 ? r.rating : null;
-      const comment = clip(r.comment, 1000).trim();
-      if (rating === null && !comment) continue;
-      f.items[d.date] = { rating, comment, updatedAt: existing?.updatedAt ?? new Date().toISOString(), source: "notion" };
-      changed = true;
+  const statusSel = { select: { options: DAY_STATUS.map((name) => ({ name })) } };
+  if (key === "days") {
+    const s: Record<string, unknown> = {
+      Gerecht: { title: {} }, Datum: { date: {} }, Week: { rich_text: {} }, Status: statusSel,
+      Boodschappen: { rich_text: {} }, "Picnic-producten": { rich_text: {} }, Bijzonderheden: { rich_text: {} },
+      Recept: { url: {} }, "Niet thuis": { checkbox: {} }, [ownerEditProp()]: { checkbox: {} }, "Claude-notitie": { rich_text: {} },
+    };
+    for (const p of people) s[p] = { number: {} };
+    for (const p of people) s[reactionProp(p)] = { rich_text: {} };
+    Object.assign(s, { Gast: { number: {} }, "Gast aantal": { number: {} }, "Gast reacties": { rich_text: {} }, "Verwerkt in overzicht": { checkbox: {} } });
+    return s;
+  }
+  if (key === "weeks") {
+    const s: Record<string, unknown> = { Week: { title: {} }, "Week-id": { rich_text: {} }, Status: statusSel, Bezorging: { date: {} }, "Claude-notitie": { rich_text: {} } };
+    for (const p of people) s[reactionProp(p)] = { rich_text: {} };
+    return s;
+  }
+  return {
+    Product: { title: {} }, Week: { rich_text: {} }, Aantal: { number: {} }, "Picnic-product": { rich_text: {} },
+    Status: { select: { options: GROCERY_STATUS.map((name) => ({ name })) } },
+    Door: { select: { options: ["Claude", ...people].map((name) => ({ name })) } },
+  };
+}
+
+let dbCache: Dbs | null = null;
+const schemaSignature = () => users().map((u) => u.name).join(",") + "|" + owner();
+
+/** Finds the three databases (shared with the integration via the page "Weekmenu"); creates missing ones and missing columns. */
+export async function dbs(): Promise<Dbs> {
+  if (!N.notionConfigured()) throw new Error("NOTION_TOKEN ontbreekt in Netlify.");
+  const sig = schemaSignature();
+  if (dbCache?.schemaFor === sig) return dbCache;
+  const cached = (await menuStore().get(DB_KEY, { type: "json" })) as Dbs | null;
+  if (cached?.schemaFor === sig) return (dbCache = cached);
+
+  const found: Partial<Record<DbKey, string>> = {};
+  const res = await N.notion("POST", "/search", { query: "Weekmenu", filter: { property: "object", value: "database" }, page_size: 100 });
+  for (const db of res.results ?? []) {
+    if (db.archived || db.in_trash) continue;
+    const t = (db.title ?? []).map((x: any) => x.plain_text).join("").trim();
+    for (const k of Object.keys(TITLES) as DbKey[]) if (t === TITLES[k] && !found[k]) found[k] = db.id;
+  }
+  let parent: string | null = null;
+  for (const k of Object.keys(TITLES) as DbKey[]) {
+    if (found[k]) {
+      // Add columns that are missing (e.g. a new family member).
+      const db = await N.notion("GET", `/databases/${found[k]}`);
+      const missing = Object.fromEntries(Object.entries(schema(k)).filter(([name, def]) => !db.properties?.[name] && !("title" in (def as object))));
+      if (Object.keys(missing).length) await N.notion("PATCH", `/databases/${found[k]}`, { properties: missing });
+      continue;
     }
-    if (changed && f) await menuStore().setJSON(key, f);
+    parent ??= await findPage("Weekmenu");
+    if (!parent) throw new Error("Notion: pagina 'Weekmenu' niet gevonden. Voeg in Notion de connectie toe aan die pagina (••• → Connecties).");
+    const db = await N.notion("POST", "/databases", { parent: { type: "page_id", page_id: parent }, title: [{ text: { content: TITLES[k] } }], properties: schema(k) });
+    found[k] = db.id;
+  }
+  dbCache = { ...(found as Record<DbKey, string>), schemaFor: sig };
+  await menuStore().setJSON(DB_KEY, dbCache);
+  return dbCache;
+}
+async function findPage(name: string): Promise<string | null> {
+  const res = await N.notion("POST", "/search", { query: name, filter: { property: "object", value: "page" } });
+  const page = (res.results ?? []).find((p: any) => {
+    const t = Object.values(p.properties ?? {}).find((v: any) => v?.type === "title") as any;
+    return !p.archived && t?.title?.map((x: any) => x.plain_text).join("").trim().toLowerCase() === name.toLowerCase();
+  });
+  return page?.id ?? null;
+}
+/** Forget cached ids (e.g. after a database was deleted). */
+async function resetDbs() {
+  dbCache = null;
+  await menuStore().delete(DB_KEY);
+}
+async function withDbs<T>(fn: (d: Dbs) => Promise<T>): Promise<T> {
+  try {
+    return await fn(await dbs());
+  } catch (err) {
+    if (/Notion 404/.test(String(err))) {
+      await resetDbs();
+      return fn(await dbs());
+    }
+    throw err;
   }
 }
 
-export async function putWeekFromClaude(input: { id: string; title?: string; status?: string; days: any[] }) {
-  if (!isDate(input.id)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
-  const old = await getWeek(input.id);
-  const byDate = new Map((old?.days ?? []).map((d) => [d.date, d]));
-  const kept: string[] = [];
-  for (const raw of input.days ?? []) {
-    if (!isDate(raw?.date)) continue;
-    const prev = byDate.get(raw.date);
-    if (prev?.editedBy === "owner") {
-      byDate.set(raw.date, { ...prev, picnic: clip(raw.picnic ?? prev.picnic, 3000) });
-      kept.push(raw.date);
-    } else {
-      byDate.set(raw.date, cleanDay(raw, "claude"));
-    }
-  }
-  const week: Week = {
-    id: input.id,
-    title: clip(input.title ?? old?.title ?? `Week van ${input.id}`, 120),
-    status: clip(input.status ?? old?.status ?? "voorstel", 40),
-    days: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
-    updatedAt: new Date().toISOString(),
+async function queryAll(db: string, body: Record<string, unknown> = {}): Promise<any[]> {
+  const out: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const r = await N.notion("POST", `/databases/${db}/query`, { ...body, page_size: 100, start_cursor: cursor });
+    out.push(...(r.results ?? []).filter((p: any) => !p.archived && !p.in_trash));
+    cursor = r.has_more ? r.next_cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+/** Runs fn over items, a few at a time, until the deadline. Returns the items that were not done. */
+async function pool<T>(items: T[], fn: (item: T) => Promise<void>, deadline = Infinity, size = 3): Promise<T[]> {
+  const queue = [...items];
+  const left: T[] = [];
+  await Promise.all(
+    Array.from({ length: size }, async () => {
+      for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
+        if (Date.now() > deadline) left.push(item);
+        else await fn(item);
+      }
+    }),
+  );
+  return left;
+}
+
+// ---------- reading Notion properties ----------
+const plain = (p: any): string =>
+  p?.type === "title" ? p.title.map((x: any) => x.plain_text).join("")
+  : p?.type === "rich_text" ? p.rich_text.map((x: any) => x.plain_text).join("")
+  : p?.type === "url" ? p.url ?? ""
+  : p?.type === "select" ? p.select?.name ?? ""
+  : "";
+const numOf = (p: any): number | null => (typeof p?.number === "number" ? p.number : null);
+const dateOf = (p: any): string => p?.date?.start?.slice(0, 10) ?? "";
+
+function toDay(page: any): Day {
+  const P = page.properties;
+  return {
+    date: dateOf(P.Datum),
+    dish: plain(P.Gerecht),
+    ingredients: plain(P.Boodschappen),
+    picnic: plain(P["Picnic-producten"]),
+    notes: plain(P.Bijzonderheden),
+    recipeUrl: plain(P.Recept),
+    away: Boolean(P["Niet thuis"]?.checkbox),
+    editedBy: P[ownerEditProp()]?.checkbox ? "owner" : "claude",
+    claudeNote: plain(P["Claude-notitie"]),
+    editedAt: page.last_edited_time,
   };
-  await menuStore().setJSON(`weeks/${week.id}`, week);
-  await importRatings(week.id, input.days ?? []);
-  return { week, keptOwnerDays: kept };
+}
+const dayWeekId = (page: any) => {
+  const w = plain(page.properties.Week).trim();
+  return isDate(w) ? w : weekIdFor(dateOf(page.properties.Datum));
+};
+function toGrocery(page: any): Grocery {
+  const P = page.properties;
+  return { id: page.id, product: plain(P.Product), amount: numOf(P.Aantal), picnic: plain(P["Picnic-product"]), status: plain(P.Status) || "gepland", by: plain(P.Door) };
+}
+
+// ---------- weeks ----------
+export type WeekData = { week: Week; feedback: Record<string, PersonFeedback>; guest: GuestFeedback; groceries: Grocery[] | null };
+
+/**
+ * Reads all weeks with days on or after `from` (and optionally only the given week ids),
+ * with everyone's feedback, guest ratings and (for weeks from `groceriesFrom`) the groceries.
+ */
+export async function loadWeeks(opts: { from?: string; only?: string; groceriesFrom?: string; guestSid?: string } = {}): Promise<WeekData[]> {
+  return withDbs(async (D) => {
+    const dayFilter = opts.only
+      ? { and: [{ property: "Datum", date: { on_or_after: opts.only } }, { property: "Datum", date: { on_or_before: addDays(opts.only, 6) } }] }
+      : { property: "Datum", date: { on_or_after: opts.from ?? "1970-01-01" } };
+    const dayPages = await queryAll(D.days, { filter: dayFilter, sorts: [{ property: "Datum", direction: "ascending" }] });
+    const ids = new Set<string>(dayPages.map(dayWeekId));
+    if (opts.only) ids.add(opts.only);
+    const idList = [...ids].filter((id) => !opts.only || id === opts.only).sort();
+    const weekPages = idList.length ? await queryAll(D.weeks, { filter: { or: idList.map((id) => ({ property: "Week-id", rich_text: { equals: id } })) } }) : [];
+    const groceryIds = idList.filter((id) => opts.only || (opts.groceriesFrom && id >= opts.groceriesFrom));
+    const groceryPages = groceryIds.length
+      ? await queryAll(D.groceries, { filter: { or: groceryIds.map((id) => ({ property: "Week", rich_text: { equals: id } })) }, sorts: [{ timestamp: "created_time", direction: "ascending" }] })
+      : [];
+    const people = users().map((u) => u.name);
+
+    return Promise.all(
+      idList.map(async (id) => {
+        const wp = weekPages.find((p) => plain(p.properties["Week-id"]).trim() === id);
+        const pages = dayPages.filter((p) => dayWeekId(p) === id);
+        const feedback: Record<string, PersonFeedback> = {};
+        for (const person of people) {
+          const items: Record<string, FeedbackItem> = {};
+          for (const p of pages) {
+            const rating = numOf(p.properties[person]);
+            const comment = plain(p.properties[reactionProp(person)]);
+            if (rating !== null || comment) items[dateOf(p.properties.Datum)] = { rating, comment, updatedAt: p.last_edited_time };
+          }
+          const wc = wp ? plain(wp.properties[reactionProp(person)]) : "";
+          if (wc) items.week = { rating: null, comment: wc, updatedAt: wp.last_edited_time };
+          if (Object.keys(items).length) feedback[person] = { person, items };
+        }
+        const days = pages.map(toDay).filter((d) => d.date);
+        return {
+          week: {
+            id,
+            title: (wp && plain(wp.properties.Week)) || `Week van ${id}`,
+            status: (wp && plain(wp.properties.Status)) || plain(pages[0]?.properties.Status) || "voorstel",
+            delivery: wp ? dateOf(wp.properties.Bezorging) : "",
+            days,
+            updatedAt: [wp?.last_edited_time, ...pages.map((p) => p.last_edited_time)].filter(Boolean).sort().at(-1) ?? "",
+          },
+          feedback,
+          guest: publicGuest(await getGuestFeedback(id), opts.guestSid),
+          groceries: groceryIds.includes(id) ? groceryPages.filter((p) => plain(p.properties.Week).trim() === id).map(toGrocery) : null,
+        };
+      }),
+    );
+  });
+}
+
+export async function getWeek(id: string): Promise<WeekData | null> {
+  if (!isDate(id)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
+  return (await loadWeeks({ only: id }))[0] ?? null;
+}
+
+async function findDayPage(date: string): Promise<any | null> {
+  const D = await dbs();
+  const pages = await queryAll(D.days, { filter: { property: "Datum", date: { equals: date } } });
+  return pages.find((p) => dayWeekId(p) === weekIdFor(date)) ?? pages[0] ?? null;
+}
+async function findWeekPage(id: string): Promise<any | null> {
+  const D = await dbs();
+  return (await queryAll(D.weeks, { filter: { property: "Week-id", rich_text: { equals: id } } }))[0] ?? null;
+}
+
+function dayProps(d: any, weekId: string, status?: string) {
+  return {
+    Gerecht: N.title(clip(d.dish, 200)),
+    Datum: N.date(d.date),
+    Week: N.text(weekId),
+    ...(status ? { Status: N.select(status) } : {}),
+    Boodschappen: N.text(clip(d.ingredients, 2000)),
+    "Picnic-producten": N.text(clip(d.picnic, 4000)),
+    Bijzonderheden: N.text(clip(d.notes, 500)),
+    Recept: N.url(/^https?:\/\//.test(d.recipeUrl ?? "") ? clip(d.recipeUrl, 500) : ""),
+    "Niet thuis": N.checkbox(Boolean(d.away)),
+  };
+}
+
+/**
+ * Claude writes a week. Days the owner edited keep the owner's dish, ingredients, notes, recipe and "away";
+ * Claude may still update their Picnic products, status and Claude-notitie.
+ * Ratings already known elsewhere can be passed per day (ratings: {"Johan": {rating, comment}}); they only fill empty cells.
+ */
+export async function putWeekFromClaude(input: {
+  id: string; title?: string; status?: string; delivery?: string; note?: string;
+  days: any[]; weekReactions?: Record<string, string>; ownerDays?: string[]; deadline?: number;
+}) {
+  if (!isDate(input.id)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
+  return withDbs(async (D) => {
+    const existing = await queryAll(D.days, {
+      filter: { and: [{ property: "Datum", date: { on_or_after: input.id } }, { property: "Datum", date: { on_or_before: addDays(input.id, 6) } }] },
+    });
+    const byDate = new Map(existing.map((p) => [dateOf(p.properties.Datum), p]));
+    const people = users().map((u) => u.name);
+    const kept: string[] = [];
+    const raws = (input.days ?? []).filter((d) => isDate(d?.date) && d.date >= input.id && d.date <= addDays(input.id, 6));
+
+    const left = await pool(raws, async (raw) => {
+      const prev = byDate.get(raw.date);
+      const ownerEdited = Boolean(prev?.properties[ownerEditProp()]?.checkbox);
+      let props: Record<string, unknown>;
+      if (ownerEdited) {
+        kept.push(raw.date);
+        props = { "Picnic-producten": N.text(clip(raw.picnic ?? plain(prev.properties["Picnic-producten"]), 4000)) };
+        if (input.status) props.Status = N.select(input.status);
+      } else {
+        props = dayProps(raw, input.id, input.status ?? (prev ? undefined : "voorstel"));
+        if (input.ownerDays?.includes(raw.date)) props[ownerEditProp()] = N.checkbox(true);
+      }
+      if (typeof raw.claudeNote === "string") props["Claude-notitie"] = N.text(clip(raw.claudeNote, 1000));
+      for (const person of people) {
+        const r = raw.ratings?.[person];
+        if (!r) continue;
+        const rating = Number.isInteger(r.rating) && r.rating >= 1 && r.rating <= 10 ? r.rating : null;
+        const comment = clip(r.comment, 1000).trim();
+        if (rating !== null && numOf(prev?.properties[person]) === null) props[person] = N.num(rating);
+        if (comment && !plain(prev?.properties[reactionProp(person)])) props[reactionProp(person)] = N.text(comment);
+      }
+      if (prev) await N.notion("PATCH", `/pages/${prev.id}`, { properties: props });
+      else await N.notion("POST", "/pages", { parent: { database_id: D.days }, properties: props });
+    }, input.deadline);
+
+    const wp = await findWeekPage(input.id);
+    const wprops: Record<string, unknown> = { "Week-id": N.text(input.id) };
+    if (input.title || !wp) wprops.Week = N.title(clip(input.title || `Week van ${input.id}`, 120));
+    if (input.status || !wp) wprops.Status = N.select(input.status || "voorstel");
+    if (isDate(input.delivery)) wprops.Bezorging = N.date(input.delivery);
+    if (typeof input.note === "string") wprops["Claude-notitie"] = N.text(clip(input.note, 2000));
+    for (const [person, c] of Object.entries(input.weekReactions ?? {})) {
+      if (people.includes(person) && c && !(wp && plain(wp.properties[reactionProp(person)]))) wprops[reactionProp(person)] = N.text(clip(c, 1000));
+    }
+    if (wp) await N.notion("PATCH", `/pages/${wp.id}`, { properties: wprops });
+    else await N.notion("POST", "/pages", { parent: { database_id: D.weeks }, properties: wprops });
+
+    return { saved: input.id, days: raws.length - left.length, notSaved: left.map((d) => d.date), keptOwnerDays: kept.sort() };
+  });
 }
 
 /** The owner edits one day on the website. */
 export async function putDayFromOwner(weekId: string, raw: any) {
-  const week = await getWeek(weekId);
-  if (!week || !isDate(raw?.date)) throw new Error("Week of dag niet gevonden");
-  const prev = week.days.find((d) => d.date === raw.date);
-  const day = cleanDay({ ...prev, ...raw, picnic: prev?.picnic ?? "" }, "owner");
-  week.days = [...week.days.filter((d) => d.date !== raw.date), day].sort((a, b) => a.date.localeCompare(b.date));
-  week.updatedAt = new Date().toISOString();
-  await menuStore().setJSON(`weeks/${weekId}`, week);
-  return day;
+  if (!isDate(weekId) || !isDate(raw?.date)) throw new Error("Week of dag niet gevonden");
+  return withDbs(async (D) => {
+    const prev = await findDayPage(raw.date);
+    const props: Record<string, unknown> = { ...dayProps({ ...raw, picnic: prev ? plain(prev.properties["Picnic-producten"]) : "" }, weekId), [ownerEditProp()]: N.checkbox(true) };
+    if (!prev) props.Status = N.select("voorstel");
+    const page = prev
+      ? await N.notion("PATCH", `/pages/${prev.id}`, { properties: props })
+      : await N.notion("POST", "/pages", { parent: { database_id: D.days }, properties: props });
+    await logEvent({ kind: "owner-edit", week: weekId, date: raw.date, day: dayName(raw.date), dish: clip(raw.dish, 200), person: owner() });
+    return toDay(page);
+  });
 }
 
 // ---------- feedback ----------
-export async function getFeedback(weekId: string): Promise<Record<string, PersonFeedback>> {
-  const out: Record<string, PersonFeedback> = {};
-  for (const u of users()) {
-    const f = (await menuStore().get(`feedback/${weekId}/${u.name.toLowerCase()}`, { type: "json" })) as PersonFeedback | null;
-    if (f) out[u.name] = f;
-  }
-  return out;
-}
-
-/** A person changes only their own feedback for one day. */
-export async function putOwnFeedback(person: string, weekId: string, date: string, comment: unknown, rating: unknown) {
+/** A person changes only their own rating and reaction for one day (date "week" = the menu as a whole). */
+export async function putOwnFeedback(person: string, weekId: string, date: string, comment: unknown, rating: unknown): Promise<FeedbackItem | null> {
   if (!isDate(weekId) || !(isDate(date) || date === "week")) throw new Error("Ongeldige week of dag");
-  const key = `feedback/${weekId}/${person.toLowerCase()}`;
-  const f = ((await menuStore().get(key, { type: "json" })) as PersonFeedback | null) ?? { person, items: {} };
   const r = rating === null || rating === "" || rating === undefined ? null : Number(rating);
   if (r !== null && !(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Cijfer moet 1 t/m 10 zijn");
   if (r !== null && (date === "week" || date > today())) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
   const text = clip(comment, 1000).trim();
-  if (!text && r === null) delete f.items[date];
-  else f.items[date] = { comment: text, rating: r, updatedAt: new Date().toISOString() };
-  await menuStore().setJSON(key, f);
-  return f;
+  return withDbs(async (D) => {
+    let dish = "";
+    if (date === "week") {
+      const wp = await findWeekPage(weekId);
+      const props = { [reactionProp(person)]: N.text(text) };
+      if (wp) await N.notion("PATCH", `/pages/${wp.id}`, { properties: props });
+      else await N.notion("POST", "/pages", { parent: { database_id: D.weeks }, properties: { ...props, Week: N.title(`Week van ${weekId}`), "Week-id": N.text(weekId), Status: N.select("voorstel") } });
+    } else {
+      const page = await findDayPage(date);
+      if (!page) throw new Error("Deze dag staat niet in het menu");
+      dish = plain(page.properties.Gerecht);
+      // Overwrites: one rating and one reaction per person per day.
+      await N.notion("PATCH", `/pages/${page.id}`, { properties: { [person]: N.num(r), [reactionProp(person)]: N.text(text) } });
+    }
+    await logEvent({ kind: "feedback", week: weekId, date, day: date === "week" ? "hele menu" : dayName(date), dish, person, rating: r, comment: text });
+    return text || r !== null ? { rating: r, comment: text, updatedAt: new Date().toISOString() } : null;
+  });
 }
 
 // ---------- guest ratings ----------
 export async function getGuestFeedback(weekId: string): Promise<GuestFeedback> {
   return ((await menuStore().get(`guest/${weekId}`, { type: "json" })) as GuestFeedback | null) ?? { items: {} };
 }
+/** Guest ratings without session ids; the viewer's own ones are marked mine. */
+function publicGuest(g: GuestFeedback, sid?: string): GuestFeedback {
+  return { items: Object.fromEntries(Object.entries(g.items).map(([d, list]) => [d, list.map(({ sid: s, ...rest }) => ({ ...rest, ...(sid && s === sid ? { mine: true } : {}) }))])) };
+}
 
-/** How many ratings the guest account may still give in the current 24 hours. */
+/** How many new ratings the guest account may still give in the current 24 hours. */
 export async function guestQuotaLeft(): Promise<number> {
   const log = ((await menuStore().get("guest/quota", { type: "json" })) as string[] | null) ?? [];
   return Math.max(0, GUEST_PER_DAY - log.filter((t) => Date.now() - Date.parse(t) < 864e5).length);
 }
 
-export async function putGuestRating(weekId: string, date: string, rating: unknown, comment: unknown) {
+/**
+ * A guest rates an eaten dish. Rating the same dish again in the same session updates that rating
+ * (and does not use up another of the 3 ratings per day).
+ */
+export async function putGuestRating(sid: string, weekId: string, date: string, rating: unknown, comment: unknown) {
   if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
   if (date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
   const r = Number(rating);
   if (!(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Kies een cijfer van 1 t/m 10");
   const s = menuStore();
-  const log = (((await s.get("guest/quota", { type: "json" })) as string[] | null) ?? []).filter((t) => Date.now() - Date.parse(t) < 864e5);
-  if (log.length >= GUEST_PER_DAY) throw new Error(`Als gast kun je ${GUEST_PER_DAY} cijfers per dag geven. Morgen kan het weer.`);
-  const week = await getWeek(weekId);
-  const day = week?.days.find((d) => d.date === date);
-  if (!day || !day.dish || day.away) throw new Error("Dit gerecht bestaat niet");
   const g = await getGuestFeedback(weekId);
-  (g.items[date] ??= []).push({ rating: r, comment: clip(comment, 1000).trim(), at: new Date().toISOString() });
-  g.items[date] = g.items[date].slice(-20);
-  await s.setJSON(`guest/${weekId}`, g);
-  log.push(new Date().toISOString());
-  await s.setJSON("guest/quota", log);
-  return g;
+  const list = (g.items[date] ??= []);
+  const own = sid ? list.find((x) => x.sid === sid) : undefined;
+  const log = (((await s.get("guest/quota", { type: "json" })) as string[] | null) ?? []).filter((t) => Date.now() - Date.parse(t) < 864e5);
+  if (!own && log.length >= GUEST_PER_DAY) throw new Error(`Als gast kun je ${GUEST_PER_DAY} cijfers per dag geven. Morgen kan het weer.`);
+
+  return withDbs(async () => {
+    const page = await findDayPage(date);
+    const dish = page ? plain(page.properties.Gerecht) : "";
+    if (!page || !dish || page.properties["Niet thuis"]?.checkbox) throw new Error("Dit gerecht bestaat niet");
+    const text = clip(comment, 1000).trim();
+    const at = new Date().toISOString();
+    if (own) Object.assign(own, { rating: r, comment: text, at });
+    else list.push({ rating: r, comment: text, at, sid });
+    g.items[date] = list.slice(-20);
+    await s.setJSON(`guest/${weekId}`, g);
+    if (!own) {
+      log.push(at);
+      await s.setJSON("guest/quota", log);
+    }
+    await writeGuestSummary(page.id, g.items[date]);
+    await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, rating: r, comment: text });
+    return publicGuest(g, sid);
+  });
+}
+async function writeGuestSummary(pageId: string, list: GuestItem[]) {
+  const avg = list.length ? Math.round((list.reduce((a, x) => a + x.rating, 0) / list.length) * 10) / 10 : null;
+  await N.notion("PATCH", `/pages/${pageId}`, {
+    properties: { Gast: N.num(avg), "Gast aantal": N.num(list.length || null), "Gast reacties": N.text(list.filter((x) => x.comment).map((x) => `${x.rating}: ${x.comment}`).join("\n")) },
+  });
 }
 
-/** Today's date in the Netherlands. */
-export const today = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Amsterdam" });
+// ---------- standard groceries ----------
+export async function listGroceries(weekId: string): Promise<Grocery[]> {
+  return withDbs(async (D) =>
+    (await queryAll(D.groceries, { filter: { property: "Week", rich_text: { equals: weekId } }, sorts: [{ timestamp: "created_time", direction: "ascending" }] })).map(toGrocery),
+  );
+}
+
+/** A family member suggests a product (the owner's own suggestions are approved straight away). */
+export async function suggestGrocery(person: string, weekId: string, product: unknown, amount: unknown) {
+  const name = clip(product, 120).trim();
+  if (!isDate(weekId) || !name) throw new Error("Vul een product in");
+  const n = amount === undefined || amount === null || amount === "" ? null : Number(amount);
+  if (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 50)) throw new Error("Aantal moet 1 t/m 50 zijn");
+  return withDbs(async (D) => {
+    await N.notion("POST", "/pages", {
+      parent: { database_id: D.groceries },
+      properties: { Product: N.title(name), Week: N.text(weekId), Aantal: N.num(n), Status: N.select(person === owner() ? "goedgekeurd" : "voorstel"), Door: N.select(person) },
+    });
+    await logEvent({ kind: "suggestion", week: weekId, person, product: name, comment: n ? `${n}×` : "" });
+    return listGroceries(weekId);
+  });
+}
+
+/** The owner approves or rejects a product; the suggester may withdraw their own open suggestion. */
+export async function changeGrocery(person: string, id: unknown, action: unknown) {
+  if (typeof id !== "string" || !/^[0-9a-f-]{32,36}$/i.test(id)) throw new Error("Onbekend product");
+  return withDbs(async (D) => {
+    const page = await N.notion("GET", `/pages/${id}`);
+    if (page.parent?.database_id?.replace(/-/g, "") !== D.groceries.replace(/-/g, "")) throw new Error("Onbekend product");
+    const g = toGrocery(page);
+    const weekId = plain(page.properties.Week).trim();
+    const isOwner = person === owner();
+    if (action === "remove") {
+      if (!isOwner && !(g.by === person && g.status === "voorstel")) throw new Error("Alleen je eigen voorstel kun je weghalen.");
+      await N.notion("PATCH", `/pages/${id}`, { archived: true });
+    } else {
+      if (!isOwner) throw new Error(`Alleen ${owner()} kan producten goedkeuren.`);
+      if (!["goedgekeurd", "afgewezen", "gepland"].includes(String(action))) throw new Error("Onbekende actie");
+      await N.notion("PATCH", `/pages/${id}`, { properties: { Status: N.select(String(action)) } });
+    }
+    return { weekId, groceries: await listGroceries(weekId) };
+  });
+}
+
+/**
+ * Claude plans the standard groceries for a week. Existing rows of the same product are updated
+ * (a product the owner rejected stays rejected); with replace, Claude's planned products that are not in the
+ * new list are removed. Family suggestions are never touched.
+ */
+export async function putGroceriesFromClaude(weekId: string, items: { product: string; amount?: number | null; picnic?: string }[], replace: boolean, deadline?: number) {
+  if (!isDate(weekId)) throw new Error("week id moet de vrijdag zijn als JJJJ-MM-DD");
+  return withDbs(async (D) => {
+    const rows = await queryAll(D.groceries, { filter: { property: "Week", rich_text: { equals: weekId } } });
+    const key = (s: string) => s.trim().toLowerCase();
+    const byName = new Map(rows.map((p) => [key(plain(p.properties.Product)), p]));
+    const wanted = new Set(items.map((i) => key(i.product)));
+    const work: (() => Promise<void>)[] = [];
+    for (const it of items) {
+      const prev = byName.get(key(it.product));
+      const props: Record<string, unknown> = { Aantal: N.num(it.amount ?? null), "Picnic-product": N.text(clip(it.picnic, 500)) };
+      if (prev) work.push(() => N.notion("PATCH", `/pages/${prev.id}`, { properties: props }));
+      else work.push(() => N.notion("POST", "/pages", { parent: { database_id: D.groceries }, properties: { ...props, Product: N.title(clip(it.product, 120)), Week: N.text(weekId), Status: N.select("gepland"), Door: N.select("Claude") } }));
+    }
+    if (replace) {
+      for (const p of rows) {
+        const g = toGrocery(p);
+        if (g.by === "Claude" && g.status === "gepland" && !wanted.has(key(g.product))) work.push(() => N.notion("PATCH", `/pages/${p.id}`, { archived: true }));
+      }
+    }
+    const left = await pool(work, (f) => f(), deadline);
+    return { week: weekId, changes: work.length - left.length, notDone: left.length };
+  });
+}
+
+// ---------- change log for Claude ----------
+async function logEvent(e: Omit<MenuEvent, "at">) {
+  const at = new Date().toISOString();
+  await menuStore().setJSON(`events/${at}-${randomBytes(3).toString("hex")}`, { at, ...e });
+}
+const MARKERS = { menu: "meta/menuProcessedAt", ratings: "meta/ratingsProcessedAt" } as const;
+export type Consumer = keyof typeof MARKERS;
+
+export async function getUpdates(consumer: Consumer, since?: string) {
+  const s = menuStore();
+  const from = since ?? (((await s.get(MARKERS[consumer], { type: "text" })) as string | null) || "1970-01-01T00:00:00Z");
+  const { blobs } = await s.list({ prefix: "events/" });
+  const keys = blobs.map((b) => b.key).filter((k) => k.slice(7) > from).sort();
+  const items = (await Promise.all(keys.map((k) => s.get(k, { type: "json" })))).filter(Boolean) as MenuEvent[];
+  return { since: from, now: new Date().toISOString(), items };
+}
+
+export async function markProcessed(consumer: Consumer, until: string) {
+  const s = menuStore();
+  await s.set(MARKERS[consumer], until);
+  // Tidy up: events older than 60 days that both consumers have seen.
+  const other = ((await s.get(MARKERS[consumer === "menu" ? "ratings" : "menu"], { type: "text" })) as string | null) ?? "";
+  const cutoff = [until, other, new Date(Date.now() - 60 * 864e5).toISOString()].sort()[0];
+  const { blobs } = await s.list({ prefix: "events/" });
+  for (const b of blobs) if (b.key.slice(7) < cutoff) await s.delete(b.key);
+  return { processedUntil: until };
+}
+
+// ---------- one-time move of the menu data that was kept in Blobs before ----------
+type OldWeek = { id: string; title: string; status: string; days: any[] };
+type OldFeedback = { person: string; items: Record<string, { comment: string; rating: number | null }> };
+const MIGRATION_KEY = "meta/migration";
+
+export async function migrationPending(): Promise<boolean> {
+  const m = (await menuStore().get(MIGRATION_KEY, { type: "json" })) as { finished?: boolean } | null;
+  return !m?.finished;
+}
+
+/** Copies the weeks that were stored in Blobs into the Notion databases, a few weeks per run. */
+export async function migrateFromBlobs(deadline: number) {
+  const s = menuStore();
+  const state = ((await s.get(MIGRATION_KEY, { type: "json" })) as { done: string[]; finished?: boolean } | null) ?? { done: [] };
+  if (state.finished) return state;
+  const { blobs } = await s.list({ prefix: "weeks/" });
+  const ids = blobs.map((b) => b.key.slice(6)).filter(isDate).sort();
+  for (const id of ids) {
+    if (state.done.includes(id)) continue;
+    if (Date.now() > deadline - 8000) return state;
+    const w = (await s.get(`weeks/${id}`, { type: "json" })) as OldWeek | null;
+    if (!w) { state.done.push(id); continue; }
+    const fb: OldFeedback[] = [];
+    for (const u of users()) {
+      const f = (await s.get(`feedback/${id}/${u.name.toLowerCase()}`, { type: "json" })) as OldFeedback | null;
+      if (f) fb.push({ ...f, person: u.name });
+    }
+    const days = w.days.map((d) => ({
+      ...d,
+      dish: d.dish === "AGV-donderdag" ? "AGV" : d.dish,
+      ratings: Object.fromEntries(fb.filter((f) => f.items[d.date]).map((f) => [f.person, f.items[d.date]])),
+    }));
+    const weekReactions = Object.fromEntries(fb.filter((f) => f.items.week?.comment).map((f) => [f.person, f.items.week.comment]));
+    const status = w.status === "besteld" ? "in winkelmand" : DAY_STATUS.includes(w.status) ? w.status : undefined;
+    await putWeekFromClaude({ id, title: w.title, status, days, weekReactions, ownerDays: w.days.filter((d) => d.editedBy === "owner").map((d) => d.date) });
+    const g = await getGuestFeedback(id);
+    for (const [date, list] of Object.entries(g.items)) {
+      const page = list.length ? await findDayPage(date) : null;
+      if (page) await writeGuestSummary(page.id, list);
+    }
+    state.done.push(id);
+    await s.setJSON(MIGRATION_KEY, state);
+  }
+  state.finished = true;
+  await s.setJSON(MIGRATION_KEY, state);
+  return state;
+}

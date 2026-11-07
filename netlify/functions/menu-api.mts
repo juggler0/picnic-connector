@@ -4,9 +4,12 @@
  *   POST /api/menu/login     {name, pin}         → sets the session cookie
  *   POST /api/menu/guest                         → guest session (read everything, a few ratings per day)
  *   POST /api/menu/logout
- *   GET  /api/menu/state                         → weeks + everyone's feedback (logged in)
+ *   GET  /api/menu/state                         → weeks + everyone's feedback + groceries (logged in)
  *   POST /api/menu/feedback  {weekId, date, comment, rating}   → own feedback only (date "week" = the whole menu)
  *   POST /api/menu/day       {weekId, day}       → owner only: change a dish / ingredients
+ *   POST /api/menu/grocery   {weekId, product, amount}         → suggest a product (owner: approved straight away)
+ *   POST /api/menu/grocery-status {id, action}   → owner: goedgekeurd/afgewezen/gepland; anyone: "remove" own suggestion
+ * Everything is read from and written to Notion straight away (see netlify/lib/menu.mts).
  */
 import type { Config, Context } from "@netlify/functions";
 import * as M from "../lib/menu.mts";
@@ -45,21 +48,34 @@ export default async (req: Request, context: Context) => {
     const isOwner = !isGuest && me === M.owner();
 
     if (action === "state" && req.method === "GET") {
-      const from = new Date(Date.now() - WEEKS_BACK_DAYS * 864e5).toISOString().slice(0, 10);
-      const ids = (await M.listWeekIds()).filter((id) => id >= from);
-      const weeks = await Promise.all(
-        ids.map(async (id) => ({ week: await M.getWeek(id), feedback: await M.getFeedback(id), guest: await M.getGuestFeedback(id) })),
-      );
+      const t = M.today();
+      const weeks = await M.loadWeeks({
+        from: M.addDays(t, -WEEKS_BACK_DAYS),
+        groceriesFrom: M.weekIdFor(t), // groceries for the current week and the ones after it
+        guestSid: isGuest ? M.guestSessionId(req) : undefined,
+      });
       return json({
-        me, isOwner, isGuest, owner: M.owner(), people: M.users().map((u) => u.name), today: M.today(), weeks,
+        me, isOwner, isGuest, owner: M.owner(), people: M.users().map((u) => u.name), today: t, weeks,
         guestLeft: isGuest ? await M.guestQuotaLeft() : null,
       });
     }
 
     if (action === "feedback" && req.method === "POST") {
       const { weekId, date, comment, rating } = await req.json();
-      if (isGuest) return json({ ok: true, guest: await M.putGuestRating(weekId, date, rating, comment), guestLeft: await M.guestQuotaLeft() });
-      return json({ ok: true, feedback: await M.putOwnFeedback(me, weekId, date, comment, rating) });
+      if (isGuest) return json({ ok: true, guest: await M.putGuestRating(M.guestSessionId(req), weekId, date, rating, comment), guestLeft: await M.guestQuotaLeft() });
+      return json({ ok: true, item: await M.putOwnFeedback(me, weekId, date, comment, rating) });
+    }
+
+    if (action === "grocery" && req.method === "POST") {
+      if (isGuest) return json({ error: "Gasten kunnen geen boodschappen voorstellen." }, 403);
+      const { weekId, product, amount } = await req.json();
+      return json({ ok: true, groceries: await M.suggestGrocery(me, weekId, product, amount) });
+    }
+
+    if (action === "grocery-status" && req.method === "POST") {
+      if (isGuest) return json({ error: "Niet toegestaan" }, 403);
+      const { id, action: what } = await req.json();
+      return json({ ok: true, ...(await M.changeGrocery(me, id, what)) });
     }
 
     if (action === "day" && req.method === "POST") {

@@ -1,5 +1,5 @@
 /**
- * Minimal Notion API client for the order-history export.
+ * Minimal Notion API client (order-history export and the family menu).
  * Uses the NOTION_TOKEN env var (an "internal integration" secret you create in Notion).
  * Notion allows about 3 requests per second, so every call waits a little and retries on 429.
  */
@@ -12,9 +12,22 @@ export function notionConfigured() {
   return Boolean(Netlify.env.get("NOTION_TOKEN"));
 }
 
+// Token bucket: short bursts of up to 8 calls, then about 3 per second on average (Notion's limit).
+const BUCKET = 8, PER_SEC = 3;
+let tokens = BUCKET, refilledAt = Date.now();
+async function takeToken() {
+  for (;;) {
+    const now = Date.now();
+    tokens = Math.min(BUCKET, tokens + ((now - refilledAt) / 1000) * PER_SEC);
+    refilledAt = now;
+    if (tokens >= 1) { tokens -= 1; return; }
+    await sleep(Math.ceil(((1 - tokens) / PER_SEC) * 1000));
+  }
+}
+
 export async function notion(method: string, path: string, body?: unknown): Promise<any> {
   for (let attempt = 0; attempt < 4; attempt++) {
-    await sleep(350);
+    await takeToken();
     const res = await fetch(API + path, {
       method,
       headers: {
@@ -37,7 +50,11 @@ export async function notion(method: string, path: string, body?: unknown): Prom
 
 // ---------- property helpers ----------
 export const title = (text: string) => ({ title: [{ text: { content: text.slice(0, 2000) } }] });
-export const text = (value: string | null | undefined) => ({ rich_text: value ? [{ text: { content: value.slice(0, 2000) } }] : [] });
+/** Rich text; longer texts are split into pieces of 2000 characters (Notion's limit per piece). */
+export const text = (value: string | null | undefined) => ({
+  rich_text: value ? (value.slice(0, 20000).match(/[\s\S]{1,2000}/g) ?? []).map((content) => ({ text: { content } })) : [],
+});
+export const url = (value: string | null | undefined) => ({ url: value || null });
 export const num = (value: number | null | undefined) => ({ number: value ?? null });
 export const euros = (cents: number | null | undefined) => num(cents == null ? null : Math.round(cents) / 100);
 export const date = (start: string | null | undefined, end?: string | null) => ({ date: start ? { start, end: end ?? null } : null });
