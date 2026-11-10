@@ -144,6 +144,8 @@ let rateFor = {};      // owner: whose rating the scale sets, per day
 let drafts = {};       // unsent reactions, kept across re-renders
 let errors = {};       // last error per day
 let centerTabs = true; // scroll the week chips once, not on every save
+let firstView = true;  // the first time the menu is shown: open at today's dish
+if ("scrollRestoration" in history) history.scrollRestoration = "manual"; // we place the page ourselves
 
 const MONTHS = ["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"];
 const DAYS = ["zondag","maandag","dinsdag","woensdag","donderdag","vrijdag","zaterdag"];
@@ -181,7 +183,8 @@ async function api(path, body) {
 async function load() {
   try {
     S = await api("state");
-    if (!selected || !S.weeks.some((w) => w.week?.id === selected)) selected = S.weeks.at(-1)?.week?.id ?? null;
+    if (!selected || !S.weeks.some((w) => w.week?.id === selected))
+      selected = (S.weeks.find((w) => w.week && phase(w.week) === "now") ?? S.weeks.at(-1))?.week?.id ?? null; // this week first
     render();
   } catch (e) {
     if (e.status === 401) renderLogin();
@@ -235,14 +238,34 @@ function render() {
     W.week.days.map((day) => renderDay(W, day)),
     renderGroceries(W),
     renderWeekComment(W));
-  const y = window.scrollY;
+  const anchor = firstView ? null : scrollAnchor();
   app.replaceChildren(header, tabs, card);
-  window.scrollTo(0, y); // stay where you were after saving
+  if (firstView) { firstView = false; scrollToToday(); }
+  else keepAnchor(anchor); // stay where you were after a save or change, even if something above grew or shrank
   if (centerTabs) {
     centerTabs = false;
     const b = tabs.querySelector('[aria-pressed="true"]');
     if (b) tabs.scrollLeft = b.offsetLeft - (tabs.clientWidth - b.offsetWidth) / 2;
   }
+}
+
+// Keep the page still on re-render: remember which block is at the top of the screen and put it back at the same spot.
+function scrollAnchor() {
+  const y = window.scrollY;
+  for (const n of app.querySelectorAll("[data-anchor]")) {
+    const r = n.getBoundingClientRect();
+    if (r.bottom > 0) return { key: n.dataset.anchor, top: r.top, y };
+  }
+  return { key: null, top: 0, y };
+}
+function keepAnchor(a) {
+  const n = a.key && app.querySelector(`[data-anchor="${a.key}"]`);
+  if (n) window.scrollBy(0, n.getBoundingClientRect().top - a.top);
+  else window.scrollTo(0, a.y);
+}
+function scrollToToday() {
+  const n = app.querySelector(`[data-anchor="${S.today}"]`);
+  if (n) window.scrollTo(0, Math.max(0, n.getBoundingClientRect().top + window.scrollY - 8));
 }
 
 function renderDay(W, day) {
@@ -284,7 +307,7 @@ function renderDay(W, day) {
     ...guestList.filter((g) => g.comment).map((g) => el("li", {}, el("b", {}, g.mine ? "Gast (jij)" : "Gast"), g.comment)),
   ];
 
-  return el("article", { class: "day" },
+  return el("article", { class: "day", "data-anchor": day.date },
     el("div", { class: "dayname" }, longDate(day.date)),
     el("div", { class: "dish" + (hasMeal ? "" : " empty") }, day.away ? "Niet thuis" : day.dish || "Nog niet ingevuld"),
     day.notes && el("p", { class: "notes" }, day.notes),
@@ -408,7 +431,7 @@ function renderGroceries(W) {
       catch (e) { status.textContent = e.message; } } },
       product, amount, el("button", { class: "btn", type: "submit" }, S.isOwner ? "Toevoegen" : "Voorstellen"));
   }
-  return el("div", { class: "wkc groc" },
+  return el("div", { class: "wkc groc", "data-anchor": "groceries" },
     el("h3", {}, "Standaard boodschappen"),
     rows.length ? el("ul", {}, rows) : el("p", { class: "muted", style: "text-align:center;margin:0" }, "Nog geen boodschappen gepland."),
     form, status,
@@ -439,7 +462,7 @@ function renderWeekComment(W) {
   const firstDay = W.week.days[0]?.date || W.week.id;
   if (firstDay <= S.today || S.isGuest) return null; // reactions on the menu as a whole: only for the proposal
   const list = S.people.filter((p) => W.feedback[p]?.items?.week?.comment).map((p) => el("li", {}, el("b", {}, p), W.feedback[p].items.week.comment));
-  return el("div", { class: "wkc" },
+  return el("div", { class: "wkc", "data-anchor": "week-comment" },
     el("h3", {}, "Reacties op dit menu"),
     list.length ? el("ul", { class: "notes-list" }, list) : null,
     renderComment(W, "week", false, null));
