@@ -58,7 +58,7 @@ export const weekIdFor = (date: string) => addDays(date, -((new Date(date + "T12
 export const today = () => new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Amsterdam" });
 
 // ---------- users ----------
-export function users(): { name: string; pin: string }[] {
+function rawUsers(): { name: string; pin: string }[] {
   return (Netlify.env.get("MENU_USERS") ?? "")
     .split(",")
     .map((x) => x.trim())
@@ -67,9 +67,15 @@ export function users(): { name: string; pin: string }[] {
       const [name, pin] = x.split(":").map((s) => s.trim());
       return { name, pin: pin ?? "" };
     })
-    .filter((u) => u.name && /^\d{4,8}$/.test(u.pin));
+    .filter((u) => u.name);
 }
-export const owner = () => Netlify.env.get("MENU_OWNER")?.trim() || users()[0]?.name || "";
+export const owner = () => Netlify.env.get("MENU_OWNER")?.trim() || rawUsers()[0]?.name || "";
+/** Family members. Only the owner logs in with a PIN (4–8 digits); the others just tap their name. */
+export function users(): { name: string; pin: string }[] {
+  const o = owner();
+  return rawUsers().filter((u) => u.name !== o || /^\d{4,8}$/.test(u.pin));
+}
+export const needsPin = (name: string) => name === owner();
 export const findUser = (name: string) => users().find((u) => u.name.toLowerCase() === String(name).trim().toLowerCase());
 
 const eq = (a: string, b: string) => {
@@ -116,6 +122,7 @@ export async function checkLogin(name: string, pin: string): Promise<{ ok: true;
   const s = menuStore();
   const fails = ((await s.get(key, { type: "json" })) as { count: number; since: number } | null) ?? { count: 0, since: Date.now() };
   if (Date.now() - fails.since > 30 * 60_000) Object.assign(fails, { count: 0, since: Date.now() });
+  if (!needsPin(user.name)) return { ok: true, name: user.name }; // family members: no PIN
   if (fails.count >= 8) return { ok: false, error: "Te vaak een verkeerde pincode. Probeer het over een half uur opnieuw." };
   if (!eq(String(pin), user.pin)) {
     fails.count += 1;

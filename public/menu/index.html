@@ -90,6 +90,8 @@
   .scores button.cell.sel { outline: 1px solid var(--brass-soft); }
   .mine .for { margin: 6px 0 6px; font-size: .85rem; color: var(--muted); text-align: center; }
   .hint { color: var(--muted); font-size: .82rem; }
+  .rs { color: var(--muted); }
+  .rs.ok { color: var(--brass); font-weight: 600; }
   .scores small { display: block; color: var(--muted); font-size: .78rem; }
   .scores span { font: 400 1.35rem/1.2 var(--serif); }
   .scores .none { color: var(--line); }
@@ -122,7 +124,9 @@
 
   .login { max-width: 380px; margin: 10vh auto 0; }
   .who-row { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
-  .who-row:last-of-type { border-bottom: 0; }
+  .who-list > :last-child { border-bottom: 0; }
+  .who-btn { width: 100%; background: none; border: 0; border-bottom: 1px solid var(--line); text-align: left; cursor: pointer; font: 400 1.15rem/1.2 var(--serif); color: var(--ink); }
+  .who-btn .go { justify-self: end; color: var(--muted); font-family: var(--sans); }
   .who-row label { font: 400 1.15rem/1.2 var(--serif); }
   .who-row input { text-align: center; letter-spacing: .3em; }
   .guest-btn { width: 100%; margin-top: 18px; }
@@ -144,7 +148,8 @@ let rateFor = {};      // owner: whose rating the scale sets, per day
 let drafts = {};       // unsent reactions, kept across re-renders
 let errors = {};       // last error per day
 let centerTabs = true; // scroll the week chips once, not on every save
-let firstView = true;  // the first time the menu is shown: open at today's dish
+let firstView = true;
+let rateState = {};    // per day: "saving" | "saved" | undefined, to show that a tap was stored  // the first time the menu is shown: open at today's dish
 if ("scrollRestoration" in history) history.scrollRestoration = "manual"; // we place the page ourselves
 
 const MONTHS = ["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"];
@@ -194,25 +199,27 @@ async function load() {
 
 // ---------- login: names under each other, PIN next to your name ----------
 async function renderLogin() {
-  let people = [];
-  try { people = (await api("people")).people; } catch {}
+  let people = [], withPin = [];
+  try { ({ people, pin: withPin = [] } = await api("people")); } catch {}
   const error = el("p", { class: "err", role: "alert" });
   const login = async (name, input) => {
     error.textContent = "";
-    try { await api("login", { name, pin: input.value }); await load(); }
-    catch (e) { error.textContent = `${name}: ${e.message}`; input.value = ""; input.focus(); }
+    try { await api("login", { name, pin: input?.value ?? "" }); firstView = true; await load(); }
+    catch (e) { error.textContent = `${name}: ${e.message}`; if (input) { input.value = ""; input.focus(); } }
   };
+  // Tap your name; only the owner also types a PIN.
   const rows = people.map((name) => {
+    if (!withPin.includes(name)) return el("button", { type: "button", class: "who-row who-btn", onclick: () => login(name) }, el("span", {}, name), el("span", { class: "go", "aria-hidden": "true" }, "→"));
     const id = "pin-" + name.toLowerCase();
-    const input = el("input", { id, type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", "aria-label": "Pincode " + name });
+    const input = el("input", { id, type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", placeholder: "pincode", "aria-label": "Pincode " + name });
     input.addEventListener("input", () => { if (/^\d{4}$/.test(input.value)) login(name, input); });
     input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") login(name, input); });
     return el("div", { class: "who-row" }, el("label", { for: id }, name), input);
   });
   app.replaceChildren(el("div", { class: "login" }, el("div", { class: "card" },
-    el("h1", {}, "Ons menu"), el("p", { class: "sub" }, "Vul je pincode in naast je naam"), el("div", { class: "ornament" }),
-    el("div", { style: "margin-top:14px" }, rows), error,
-    el("button", { class: "btn ghost guest-btn", onclick: async () => { try { await api("guest", {}); await load(); } catch (e) { error.textContent = e.message; } } }, "Doorgaan als gast"))));
+    el("h1", {}, "Ons menu"), el("p", { class: "sub" }, "Tik op je naam"), el("div", { class: "ornament" }),
+    el("div", { class: "who-list", style: "margin-top:14px" }, rows), error,
+    el("button", { class: "btn ghost guest-btn", onclick: async () => { try { await api("guest", {}); firstView = true; await load(); } catch (e) { error.textContent = e.message; } } }, "Doorgaan als gast"))));
 }
 
 // ---------- the menu ----------
@@ -295,7 +302,9 @@ function renderDay(W, day) {
       const current = S.isGuest ? ownGuest?.rating ?? null : feedback[target]?.items?.[day.date]?.rating ?? null;
       const label = S.isGuest || target === S.me ? "Jouw cijfer" : "Cijfer van " + target;
       scale = el("div", { class: "mine" },
-        el("p", { class: "for" }, label),
+        el("p", { class: "for" }, label,
+          rateState[day.date] === "saving" ? el("span", { class: "rs" }, " · opslaan…")
+          : rateState[day.date] === "saved" ? el("span", { class: "rs ok" }, " · ✓ opgeslagen") : null),
         el("div", { class: "rating", role: "group", "aria-label": label },
           Array.from({ length: 10 }, (_, i) => el("button", { type: "button", "aria-pressed": String(current === i + 1),
             onclick: () => setRating(W, day, target, current === i + 1 && !S.isGuest ? null : i + 1) }, i + 1))));
@@ -326,7 +335,7 @@ function renderDay(W, day) {
 }
 
 // Ratings save on tap. Taps are sent one after the other; only the last one counts.
-const pendingRating = {}, sendingRating = {};
+const pendingRating = {}, sendingRating = {}, rateTimer = {};
 function setRating(W, day, person, rating) {
   errors[day.date] = "";
   if (S.isGuest) {
@@ -340,6 +349,7 @@ function setRating(W, day, person, rating) {
     if (rating === null && !it?.comment) delete f.items[day.date];
     else f.items[day.date] = { ...(it ?? { comment: "" }), rating };
   }
+  rateState[day.date] = "saving";
   render();
   const key = W.week.id + day.date + person;
   pendingRating[key] = { weekId: W.week.id, date: day.date, person, rating };
@@ -352,9 +362,16 @@ async function flushRating(W, key) {
     delete pendingRating[key];
     try {
       const r = await api("rating", body);
-      if (S.isGuest && !pendingRating[key]) { W.guest = r.guest; S.guestLeft = r.guestLeft; render(); }
+      if (S.isGuest && !pendingRating[key]) { W.guest = r.guest; S.guestLeft = r.guestLeft; }
+      if (!pendingRating[key]) {
+        rateState[body.date] = "saved";
+        render();
+        clearTimeout(rateTimer[body.date]);
+        rateTimer[body.date] = setTimeout(() => { if (rateState[body.date] === "saved") { delete rateState[body.date]; render(); } }, 2500);
+      }
     } catch (e) {
       errors[body.date] = e.message;
+      delete rateState[body.date];
       await load(); // show what is really saved
     }
   }

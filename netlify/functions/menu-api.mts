@@ -1,6 +1,6 @@
 /**
  * API behind the family menu website (public/menu/index.html).
- *   GET  /api/menu/people                        → first names for the login screen (public)
+ *   GET  /api/menu/people                        → first names for the login screen (public); only the owner needs a PIN
  *   POST /api/menu/login     {name, pin}         → sets the session cookie
  *   POST /api/menu/guest                         → guest session (read everything, a few ratings per day)
  *   POST /api/menu/logout
@@ -27,7 +27,7 @@ export default async (req: Request, context: Context) => {
 
   try {
     if (action === "people" && req.method === "GET") {
-      return json({ people: M.users().map((u) => u.name) });
+      return json({ people: M.users().map((u) => u.name), pin: M.users().filter((u) => M.needsPin(u.name)).map((u) => u.name) });
     }
     if (action === "login" && req.method === "POST") {
       if (!M.users().length) return json({ error: "Er zijn nog geen gebruikers ingesteld (MENU_USERS in Netlify)." }, 500);
