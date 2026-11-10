@@ -6,7 +6,9 @@
  *   POST /api/menu/logout
  *   GET  /api/menu/state                         → weeks + everyone's feedback + groceries (logged in)
  *   POST /api/menu/rating    {weekId, date, rating, person?}   → a rating, change any time (owner may rate for others)
- *   POST /api/menu/comment   {weekId, date, comment}           → a reaction, once per person per dish (date "week" = the whole menu)
+ *   POST /api/menu/comment   {weekId, date, comment, edit?, person?} → a reaction: once per person per dish, then editable
+ *                                                                 (own; the owner: everyone's, guests via guestIndex)
+ *   GET  /api/menu/recipes                       → owner: dishes from the overview page, to pick from
  *   POST /api/menu/day       {weekId, day}       → owner only: change a dish / ingredients
  *   POST /api/menu/grocery   {weekId, product, amount}         → suggest a product (owner: approved straight away)
  *   POST /api/menu/grocery-status {id, action}   → owner: goedgekeurd/afgewezen/gepland; anyone: "remove" own suggestion
@@ -62,15 +64,22 @@ export default async (req: Request, context: Context) => {
     }
 
     if (action === "rating" && req.method === "POST") {
-      const { weekId, date, rating, person } = await req.json();
+      const { weekId, date, rating, person, guestIndex } = await req.json();
       if (isGuest) return json({ ok: true, guest: await M.putGuestRating(M.guestSessionId(req), weekId, date, rating), guestLeft: await M.guestQuotaLeft() });
+      if (isOwner && person === M.GUEST) return json({ ok: true, guest: await M.putGuestByOwner(weekId, date, Number.isInteger(guestIndex) ? guestIndex : null, { rating }) });
       return json({ ok: true, ...(await M.putRating(me, String(person || me), weekId, date, rating)) });
     }
 
     if (action === "comment" && req.method === "POST") {
-      const { weekId, date, comment } = await req.json();
-      if (isGuest) return json({ ok: true, guest: await M.putGuestComment(M.guestSessionId(req), weekId, date, comment) });
-      return json({ ok: true, item: await M.putComment(me, weekId, date, comment) });
+      const { weekId, date, comment, person, edit, guestIndex } = await req.json();
+      if (isGuest) return json({ ok: true, guest: await M.putGuestComment(M.guestSessionId(req), weekId, date, comment, Boolean(edit)) });
+      if (isOwner && person === M.GUEST) return json({ ok: true, guest: await M.putGuestByOwner(weekId, date, Number.isInteger(guestIndex) ? guestIndex : null, { comment }) });
+      return json({ ok: true, ...(await M.putComment(me, String(person || me), weekId, date, comment, Boolean(edit))) });
+    }
+
+    if (action === "recipes" && req.method === "GET") {
+      if (!isOwner) return json({ error: "Niet toegestaan" }, 403);
+      return json({ recipes: await M.listRecipes(new URL(req.url).searchParams.has("refresh")) });
     }
 
     if (action === "grocery" && req.method === "POST") {

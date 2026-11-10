@@ -39,7 +39,7 @@ export type Day = {
 export type Week = { id: string; title: string; status: string; delivery: string; days: Day[]; updatedAt: string };
 export type FeedbackItem = { comment: string; rating: number | null; updatedAt: string };
 export type PersonFeedback = { person: string; items: Record<string, FeedbackItem> }; // key = date, or "week" for the menu as a whole
-export type GuestItem = { rating: number; comment: string; at: string; sid?: string; mine?: boolean };
+export type GuestItem = { rating: number; comment: string; at: string; commentAt?: string; sid?: string; mine?: boolean };
 export type GuestFeedback = { items: Record<string, GuestItem[]> };
 export type Grocery = { id: string; product: string; amount: number | null; picnic: string; price: number | null; status: string; by: string };
 export type MenuEvent = {
@@ -293,7 +293,10 @@ function toGrocery(page: any): Grocery {
 }
 
 // ---------- weeks ----------
-export type WeekData = { week: Week; feedback: Record<string, PersonFeedback>; guest: GuestFeedback; groceries: Grocery[] | null };
+export type WeekData = {
+  week: Week; feedback: Record<string, PersonFeedback>; guest: GuestFeedback; groceries: Grocery[] | null;
+  ctimes: Record<string, string>; // "date|person" → when that reaction was first posted (for the order on screen)
+};
 
 /**
  * Reads all weeks with days on or after `from` (and optionally only the given week ids),
@@ -343,6 +346,7 @@ export async function loadWeeks(opts: { from?: string; only?: string; groceriesF
           },
           feedback,
           guest: publicGuest(await getGuestFeedback(id), opts.guestSid),
+          ctimes: await getCommentTimes(id),
           groceries: groceryIds.includes(id) ? groceryPages.filter((p) => plain(p.properties.Week).trim() === id).map(toGrocery) : null,
         };
       }),
@@ -481,28 +485,84 @@ export async function putRating(actor: string, person: string, weekId: string, d
 }
 
 /** A reaction on a dish (or "week" = the whole menu): once per person; after that it can no longer be changed. */
-export async function putComment(person: string, weekId: string, date: string, comment: unknown) {
+const CTIME = (weekId: string) => `ctime/${weekId}`;
+export async function getCommentTimes(weekId: string): Promise<Record<string, string>> {
+  return ((await menuStore().get(CTIME(weekId), { type: "json" })) as Record<string, string> | null) ?? {};
+}
+async function setCommentTime(weekId: string, key: string, at: string | null) {
+  const t = await getCommentTimes(weekId);
+  if (at && t[key]) return; // keep the original time when a reaction is edited
+  if (at) t[key] = at; else delete t[key];
+  await menuStore().setJSON(CTIME(weekId), t);
+}
+
+/**
+ * A reaction on a dish (or "week" = the whole menu). A new one: once per person.
+ * edit = change an existing one (your own; the owner may change everyone's); empty text removes it.
+ */
+export async function putComment(actor: string, person: string, weekId: string, date: string, comment: unknown, edit = false) {
   if (!isDate(weekId) || !(isDate(date) || date === "week")) throw new Error("Ongeldige week of dag");
-  const text = clip(comment, 1000).trim();
-  if (!text) throw new Error("Schrijf eerst een reactie");
+  if (!users().some((u) => u.name === person)) throw new Error("Onbekende persoon");
+  if (person !== actor && actor !== owner()) throw new Error("Je kunt alleen je eigen reactie aanpassen.");
+  const text = await polish(clip(comment, 1000).trim());
+  if (!text && !edit) throw new Error("Schrijf eerst een reactie");
   return withDbs(async (D) => {
     let dish = "";
     if (date === "week") {
       const wp = await findWeekPage(weekId);
-      if (wp && plain(wp.properties[reactionProp(person)])) throw new Error("Je hebt al gereageerd op dit menu.");
+      if (!edit && wp && plain(wp.properties[reactionProp(person)])) throw new Error("Je hebt al gereageerd op dit menu.");
       const props = { [reactionProp(person)]: N.text(text) };
       if (wp) await N.notion("PATCH", `/pages/${wp.id}`, { properties: props });
       else await N.notion("POST", "/pages", { parent: { database_id: D.weeks }, properties: { ...props, Week: N.title(`Week van ${weekId}`), "Week-id": N.text(weekId), Status: N.select("voorstel") } });
     } else {
       const page = await findDayPage(date);
       if (!page) throw new Error("Deze dag staat niet in het menu");
-      if (plain(page.properties[reactionProp(person)])) throw new Error("Je hebt hier al gereageerd.");
+      if (!edit && plain(page.properties[reactionProp(person)])) throw new Error("Je hebt hier al gereageerd. Tik op je reactie om hem aan te passen.");
       dish = plain(page.properties.Gerecht);
       await N.notion("PATCH", `/pages/${page.id}`, { properties: { [reactionProp(person)]: N.text(text) } });
     }
-    await logEvent({ kind: "feedback", week: weekId, date, day: date === "week" ? "hele menu" : dayName(date), dish, person, comment: text });
-    return { comment: text, rating: null, updatedAt: new Date().toISOString() } as FeedbackItem;
+    const at = new Date().toISOString();
+    await setCommentTime(weekId, `${date}|${person}`, text ? at : null);
+    await logEvent({ kind: "feedback", week: weekId, date, day: date === "week" ? "hele menu" : dayName(date), dish, person, comment: text || "(reactie verwijderd)", ...(person !== actor ? { by: actor } : {}) } as any);
+    return { item: text ? ({ comment: text, rating: null, updatedAt: at } as FeedbackItem) : null, ctime: text ? (await getCommentTimes(weekId))[`${date}|${person}`] : null };
   });
+}
+
+/**
+ * Light spelling fix for a reaction, with LanguageTool's free public service (Dutch). Only clear typos with an obvious
+ * correction are changed; names and anything uncertain stay as typed. Without an answer within 2.5 s: unchanged.
+ */
+export async function polish(text: string): Promise<string> {
+  if (!text || Netlify.env.get("MENU_SPELLING") === "off") return text;
+  try {
+    const res = await fetch("https://api.languagetool.org/v2/check", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ text, language: "nl" }),
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return text;
+    const { matches = [] } = (await res.json()) as any;
+    let out = text;
+    for (const m of [...matches].sort((a: any, b: any) => b.offset - a.offset)) {
+      const word = text.slice(m.offset, m.offset + m.length);
+      const fix = m.replacements?.[0]?.value as string | undefined;
+      if (!fix || m.rule?.issueType !== "misspelling") continue;
+      if (/^[A-ZÀ-Þ]/.test(word) || /\d/.test(word) || word.length < 3) continue; // names, numbers, short words
+      if (editDistance(word.toLowerCase(), fix.toLowerCase()) > 2) continue;
+      out = out.slice(0, m.offset) + fix + out.slice(m.offset + m.length);
+    }
+    return out;
+  } catch {
+    return text;
+  }
+}
+function editDistance(a: string, b: string) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
 }
 
 // ---------- guest ratings ----------
@@ -560,21 +620,55 @@ export async function putGuestRating(sid: string, weekId: string, date: string, 
 }
 
 /** A guest's reaction on a dish they rated in this session: once. */
-export async function putGuestComment(sid: string, weekId: string, date: string, comment: unknown) {
+/** A guest's reaction on a dish they rated in this session (once; edit = change it, empty removes it). */
+export async function putGuestComment(sid: string, weekId: string, date: string, comment: unknown, edit = false) {
   if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
-  const text = clip(comment, 1000).trim();
-  if (!text) throw new Error("Schrijf eerst een reactie");
+  const text = await polish(clip(comment, 1000).trim());
+  if (!text && !edit) throw new Error("Schrijf eerst een reactie");
   const g = await getGuestFeedback(weekId);
   const own = sid ? (g.items[date] ?? []).find((x) => x.sid === sid) : undefined;
   if (!own) throw new Error("Geef eerst een cijfer");
-  if (own.comment) throw new Error("Je hebt hier al gereageerd.");
+  if (own.comment && !edit) throw new Error("Je hebt hier al gereageerd. Tik op je reactie om hem aan te passen.");
   return withDbs(async () => {
     const { page, dish } = await guestDish(date);
     own.comment = text;
+    if (text && !own.commentAt) own.commentAt = new Date().toISOString();
     await menuStore().setJSON(`guest/${weekId}`, g);
     await writeGuestSummary(page.id, g.items[date]);
     await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, rating: own.rating, comment: text });
     return publicGuest(g, sid);
+  });
+}
+
+/**
+ * The owner changes guest ratings and reactions for a day: index = which guest (null = a new one, e.g. a visitor
+ * without a phone). rating null removes that guest's rating altogether. No daily limit for the owner.
+ */
+export async function putGuestByOwner(weekId: string, date: string, index: number | null, change: { rating?: unknown; comment?: unknown }) {
+  if (!isDate(weekId) || !isDate(date)) throw new Error("Ongeldige week of dag");
+  const g = await getGuestFeedback(weekId);
+  const list = (g.items[date] ??= []);
+  return withDbs(async () => {
+    const { page, dish } = await guestDish(date);
+    const at = new Date().toISOString();
+    if ("rating" in change) {
+      const r = change.rating === null ? null : Number(change.rating);
+      if (r !== null && !(Number.isInteger(r) && r >= 1 && r <= 10)) throw new Error("Cijfer moet 1 t/m 10 zijn");
+      if (r !== null && date > today()) throw new Error("Een cijfer kan pas als het gerecht gegeten is");
+      if (index === null || !list[index]) { if (r !== null) list.push({ rating: r, comment: "", at, sid: "owner-" + randomBytes(4).toString("hex") }); }
+      else if (r === null) list.splice(index, 1);
+      else Object.assign(list[index], { rating: r, at });
+    }
+    if ("comment" in change) {
+      if (index === null || !list[index]) throw new Error("Deze gast heeft nog geen cijfer");
+      const text = await polish(clip(change.comment, 1000).trim());
+      list[index].comment = text;
+      if (text && !list[index].commentAt) list[index].commentAt = at;
+    }
+    await menuStore().setJSON(`guest/${weekId}`, g);
+    await writeGuestSummary(page.id, list);
+    await logEvent({ kind: "guest", week: weekId, date, day: dayName(date), dish, person: GUEST, comment: `(aangepast door ${owner()})` });
+    return publicGuest(g);
   });
 }
 async function writeGuestSummary(pageId: string, list: GuestItem[]) {
@@ -767,4 +861,55 @@ export async function advanceStatuses(): Promise<string | null> {
     await menuStore().set(TICK_KEY, t);
     return `${t}: ${changed} statussen bijgewerkt`;
   });
+}
+
+// ---------- recipes from the overview page (for the owner's "pick a dish" list) ----------
+export type Recipe = { name: string; category: string; ingredients: string; recipeUrl: string };
+const RECIPES_KEY = "meta/recipes";
+const RECIPES_TTL = 6 * 3600_000;
+
+/**
+ * Reads the tables on the overview page (default: the page titled "Maaltijden", or MENU_RECIPES_PAGE): per row the
+ * dish (first line of the first column), the ingredients (second column, without the pantry items in brackets)
+ * and the first link in the recipe column. Cached for 6 hours.
+ */
+export async function listRecipes(refresh = false): Promise<Recipe[]> {
+  const cached = (await menuStore().get(RECIPES_KEY, { type: "json" })) as { at: number; items: Recipe[] } | null;
+  if (!refresh && cached && Date.now() - cached.at < RECIPES_TTL) return cached.items;
+  const pageId = Netlify.env.get("MENU_RECIPES_PAGE")?.trim() || (await findPage("Maaltijden"));
+  if (!pageId) throw new Error("Notion: pagina 'Maaltijden' niet gevonden. Voeg de connectie toe aan die pagina (••• → Connecties).");
+  const children = async (id: string) => {
+    const out: any[] = [];
+    let cursor: string | undefined;
+    do {
+      const r = await N.notion("GET", `/blocks/${id}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`);
+      out.push(...(r.results ?? []));
+      cursor = r.has_more ? r.next_cursor : undefined;
+    } while (cursor);
+    return out;
+  };
+  const cellText = (cell: any[]) => (cell ?? []).map((t: any) => t.plain_text).join("");
+  const cellLink = (cell: any[]) => (cell ?? []).map((t: any) => t.href || (t.plain_text.match(/https?:\/\/\S+/) ?? [])[0]).find(Boolean) ?? "";
+  const items: Recipe[] = [];
+  let category = "";
+  const walk = async (blocks: any[], depth: number) => {
+    for (const b of blocks) {
+      if (b.type?.startsWith("heading_")) category = cellText(b[b.type].rich_text).replace(/^[^\p{L}]+/u, "").trim();
+      else if (b.type === "table") {
+        const rows = await children(b.id);
+        for (const row of rows.slice(b.table.has_column_header ? 1 : 0)) {
+          const cells = row.table_row?.cells ?? [];
+          const name = cellText(cells[0]).split("\n")[0].replace(/\(?🌱\)?|🐟/gu, "").replace(/\s+/g, " ").trim();
+          if (!name) continue;
+          const ingredients = cellText(cells[1]).split("\n").map((l) => l.replace(/^[\s•·-]+/, "").trim()).filter((l) => l && !/^\(.*\)$/.test(l)).join(", ");
+          items.push({ name, category, ingredients, recipeUrl: cellLink(cells[2]) });
+        }
+      } else if (b.has_children && depth < 2 && !["child_page", "child_database", "table"].includes(b.type)) {
+        await walk(await children(b.id), depth + 1);
+      }
+    }
+  };
+  await walk(await children(pageId), 0);
+  await menuStore().setJSON(RECIPES_KEY, { at: Date.now(), items });
+  return items;
 }

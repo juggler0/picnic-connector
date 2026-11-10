@@ -104,6 +104,8 @@ Treat this address like a password: anyone who has it can use your cart.
 | `NOTION_TOKEN` | no | Needed for the family menu website and the order-history copy to Notion (see below). |
 | `MENU_USERS` | no | Family menu website: `Name:PIN` pairs, comma-separated, PIN 4–8 digits. |
 | `MENU_OWNER` | no | Name of the person who may change dishes (default: the first name in `MENU_USERS`). |
+| `MENU_RECIPES_PAGE` | no | Notion page with the recipe tables the owner picks dishes from (default: the page titled "Maaltijden"). |
+| `MENU_SPELLING` | no | `off` turns off the light spelling fix of reactions (LanguageTool's free public service). |
 
 See [`.env.example`](.env.example). After changing a variable: **Deploys → Trigger deploy**.
 
@@ -122,7 +124,7 @@ The data lives in Notion, written straight away on every save:
    column per person), **Weekmenu-weken** and **Weekmenu-boodschappen**. Existing ones are found by title; missing
    columns (e.g. a new family member) are added.
 
-Set `MENU_USERS` (e.g. `Anna:4821,Ben:7310`) — the first name is the owner unless `MENU_OWNER` says otherwise.
+Set `MENU_USERS` (e.g. `Anna:4821,Ben,Cas`) — the first name is the owner unless `MENU_OWNER` says otherwise. Only the owner logs in with a PIN; the others tap their name.
 Claude reads and writes the menu through the `menu_*` tools of the same connector; `menu_get_updates` lists what the
 family changed since Claude last looked.
 

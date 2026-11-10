@@ -90,8 +90,13 @@
   .scores button.cell.sel { outline: 1px solid var(--brass-soft); }
   .mine .for { margin: 6px 0 6px; font-size: .85rem; color: var(--muted); text-align: center; }
   .hint { color: var(--muted); font-size: .82rem; }
-  .rs { color: var(--muted); }
-  .rs.ok { color: var(--brass); font-weight: 600; }
+  .notes-list li.editable { cursor: pointer; border-radius: 4px; }
+  .notes-list li.editable:hover { background: var(--stone); }
+  .notes-list li.editing textarea { margin-top: 6px; min-height: 60px; }
+  .scores .cell.add small { color: var(--muted); }
+  select.pick { display: block; width: 100%; max-width: 460px; margin: 10px auto 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink); font: inherit; }
+  p.pick { text-align: center; margin: 8px 0 0; font-size: .9rem; }
+  .panel select.pick { margin: 0 0 4px; }
   .scores small { display: block; color: var(--muted); font-size: .78rem; }
   .scores span { font: 400 1.35rem/1.2 var(--serif); }
   .scores .none { color: var(--line); }
@@ -148,8 +153,8 @@ let rateFor = {};      // owner: whose rating the scale sets, per day
 let drafts = {};       // unsent reactions, kept across re-renders
 let errors = {};       // last error per day
 let centerTabs = true; // scroll the week chips once, not on every save
-let firstView = true;
-let rateState = {};    // per day: "saving" | "saved" | undefined, to show that a tap was stored  // the first time the menu is shown: open at today's dish
+let firstView = true;  // the first time the menu is shown: open at today's dish
+let editNote = {};     // reactions being edited: { "<date>|<who>": true }
 if ("scrollRestoration" in history) history.scrollRestoration = "manual"; // we place the page ourselves
 
 const MONTHS = ["januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"];
@@ -245,6 +250,7 @@ function render() {
     W.week.days.map((day) => renderDay(W, day)),
     renderGroceries(W),
     renderWeekComment(W));
+  addSwipe(card);
   const anchor = firstView ? null : scrollAnchor();
   app.replaceChildren(header, tabs, card);
   if (firstView) { firstView = false; scrollToToday(); }
@@ -254,6 +260,30 @@ function render() {
     const b = tabs.querySelector('[aria-pressed="true"]');
     if (b) tabs.scrollLeft = b.offsetLeft - (tabs.clientWidth - b.offsetWidth) / 2;
   }
+}
+
+// Swipe left/right on the menu for the next/previous week.
+function goWeek(step) {
+  const i = S.weeks.findIndex((w) => w.week.id === selected) + step;
+  if (i < 0 || i >= S.weeks.length) return;
+  selected = S.weeks[i].week.id; editing = {}; rateFor = {}; errors = {}; editNote = {}; centerTabs = true;
+  render();
+  const top = app.querySelector(".card")?.getBoundingClientRect().top ?? 0;
+  window.scrollTo(0, Math.max(0, top + window.scrollY - 70));
+}
+function addSwipe(node) {
+  let x0 = null, y0 = 0, t0 = 0;
+  node.addEventListener("touchstart", (ev) => {
+    const t = ev.target;
+    x0 = t.closest("textarea, input, select, .rating, .panel") ? null : ev.touches[0].clientX;
+    y0 = ev.touches[0].clientY; t0 = Date.now();
+  }, { passive: true });
+  node.addEventListener("touchend", (ev) => {
+    if (x0 === null) return;
+    const dx = ev.changedTouches[0].clientX - x0, dy = ev.changedTouches[0].clientY - y0;
+    x0 = null;
+    if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy) && Date.now() - t0 < 700) goWeek(dx < 0 ? 1 : -1);
+  }, { passive: true });
 }
 
 // Keep the page still on re-render: remember which block is at the top of the screen and put it back at the same spot.
@@ -282,43 +312,48 @@ function renderDay(W, day) {
   const items = S.people.map((p) => [p, feedback[p]?.items?.[day.date]]);
   const guestList = guest?.items?.[day.date] ?? [];
   const ownGuest = S.isGuest ? guestList.find((g) => g.mine) : null;
-  const target = S.isOwner ? rateFor[day.date] ?? S.me : S.me; // the owner can rate for someone else
+  const target = S.isOwner ? rateFor[day.date] ?? S.me : S.me; // the owner can rate for someone else, guests too ("Gast#<n>")
+  const gIdx = target.startsWith("Gast#") ? target.slice(5) : null; // "new" or a number
 
   let scores = null, avg = null, scale = null;
   if (hasMeal && eaten) {
-    const cells = items.map(([p, i]) => {
-      const kids = [el("small", {}, p), el("span", { class: i?.rating ? "" : "none" }, i?.rating ?? "–")];
-      return S.isOwner
-        ? el("button", { type: "button", class: "cell" + (p === target ? " sel" : ""), "aria-pressed": String(p === target), title: "Cijfer van " + p + " invullen",
-            onclick: () => { rateFor[day.date] = p; render(); } }, kids)
-        : el("div", { class: "cell" + (p === S.me ? " sel" : "") }, kids);
-    });
-    const gAvg = guestList.length ? guestList.reduce((a, g) => a + g.rating, 0) / guestList.length : null;
-    if (gAvg !== null) cells.push(el("div", { class: "cell guest" + (ownGuest ? " sel" : "") }, el("small", {}, guestList.length > 1 ? `Gast (${guestList.length}×)` : "Gast"), el("span", {}, nl(gAvg))));
+    const cell = (key, label, value, isSel) => S.isOwner
+      ? el("button", { type: "button", class: "cell" + (isSel ? " sel" : ""), "aria-pressed": String(isSel), title: label + ": cijfer invullen", onclick: () => { rateFor[day.date] = key; render(); } },
+          el("small", {}, label), el("span", { class: value ? "" : "none" }, value ?? "–"))
+      : el("div", { class: "cell" + (isSel ? " sel" : "") }, el("small", {}, label), el("span", { class: value ? "" : "none" }, value ?? "–"));
+    const cells = items.map(([p, i]) => cell(p, p, i?.rating, S.isOwner ? p === target : p === S.me));
+    if (S.isOwner) {
+      // The owner sees every guest separately and can add one (e.g. a visitor without a phone).
+      guestList.forEach((g, i) => {
+        const c = cell("Gast#" + i, guestList.length > 1 ? "Gast " + (i + 1) : "Gast", g.rating, target === "Gast#" + i);
+        c.classList.add("guest");
+        cells.push(c);
+      });
+      cells.push(el("button", { type: "button", class: "cell add" + (target === "Gast#new" ? " sel" : ""), title: "Cijfer van een gast invullen", onclick: () => { rateFor[day.date] = "Gast#new"; render(); } }, el("small", {}, "+ gast"), el("span", { class: "none" }, "·")));
+    } else if (guestList.length) {
+      const gAvg = guestList.reduce((a, g) => a + g.rating, 0) / guestList.length;
+      cells.push(el("div", { class: "cell guest" + (ownGuest ? " sel" : "") }, el("small", {}, guestList.length > 1 ? `Gast (${guestList.length}×)` : "Gast"), el("span", {}, nl(gAvg))));
+    }
     scores = el("div", { class: "scores" }, cells);
     const all = [...items.map(([, i]) => i?.rating).filter(Boolean), ...guestList.map((g) => g.rating)];
     if (all.length > 1) avg = el("p", { class: "avg" }, "Gemiddeld " + nl(all.reduce((a, b) => a + b, 0) / all.length));
     if (!S.isGuest || ownGuest || S.guestLeft) {
-      const current = S.isGuest ? ownGuest?.rating ?? null : feedback[target]?.items?.[day.date]?.rating ?? null;
-      const label = S.isGuest || target === S.me ? "Jouw cijfer" : "Cijfer van " + target;
+      const current = S.isGuest ? ownGuest?.rating ?? null
+        : gIdx !== null ? (gIdx === "new" ? null : guestList[+gIdx]?.rating ?? null)
+        : feedback[target]?.items?.[day.date]?.rating ?? null;
+      const label = S.isGuest || target === S.me ? "Jouw cijfer" : gIdx === "new" ? "Cijfer van een nieuwe gast" : gIdx !== null ? "Cijfer van " + (guestList.length > 1 ? "gast " + (+gIdx + 1) : "de gast") : "Cijfer van " + target;
       scale = el("div", { class: "mine" },
-        el("p", { class: "for" }, label,
-          rateState[day.date] === "saving" ? el("span", { class: "rs" }, " · opslaan…")
-          : rateState[day.date] === "saved" ? el("span", { class: "rs ok" }, " · ✓ opgeslagen") : null),
+        el("p", { class: "for" }, label),
         el("div", { class: "rating", role: "group", "aria-label": label },
           Array.from({ length: 10 }, (_, i) => el("button", { type: "button", "aria-pressed": String(current === i + 1),
             onclick: () => setRating(W, day, target, current === i + 1 && !S.isGuest ? null : i + 1) }, i + 1))));
     }
   }
-  // Everyone's reactions, right under the dish (your own too).
-  const notes = [
-    ...items.filter(([, i]) => i?.comment).map(([p, i]) => el("li", {}, el("b", {}, p), i.comment)),
-    ...guestList.filter((g) => g.comment).map((g) => el("li", {}, el("b", {}, g.mine ? "Gast (jij)" : "Gast"), g.comment)),
-  ];
 
   return el("article", { class: "day", "data-anchor": day.date },
     el("div", { class: "dayname" }, longDate(day.date)),
     el("div", { class: "dish" + (hasMeal ? "" : " empty") }, day.away ? "Niet thuis" : day.dish || "Nog niet ingevuld"),
+    S.isOwner && !day.dish && !day.away && !editing[day.date] && recipePicker((r) => pickRecipe(week, day, r), "Kies een gerecht…"),
     day.notes && el("p", { class: "notes" }, day.notes),
     day.claudeNote && el("p", { class: "cnote" }, day.claudeNote),
     day.editedBy === "owner" && el("span", { class: "owner-mark" }, "Aangepast door " + S.owner),
@@ -328,57 +363,103 @@ function renderDay(W, day) {
       day.recipeUrl && el("a", { href: day.recipeUrl, target: "_blank", rel: "noopener" }, "Recept"),
       S.isOwner && el("button", { "aria-expanded": String(!!editing[day.date]), onclick: () => { editing[day.date] = !editing[day.date]; render(); } }, "Aanpassen")),
     editing[day.date] && renderEdit(week, day),
-    notes.length ? el("ul", { class: "notes-list" }, notes) : null,
+    renderNotes(W, day.date, items, guestList),
     scores, avg, scale,
     hasMeal && renderComment(W, day.date, eaten, ownGuest),
     errors[day.date] && el("p", { class: "err", role: "alert" }, errors[day.date]));
 }
 
-// Ratings save on tap. Taps are sent one after the other; only the last one counts.
-const pendingRating = {}, sendingRating = {}, rateTimer = {};
-function setRating(W, day, person, rating) {
+/** Everyone's reactions under the dish, oldest first. Tap your own to change it (the owner: anyone's). */
+function renderNotes(W, date, items, guestList) {
+  const notes = [
+    ...items.filter(([, i]) => i?.comment).map(([p, i]) => ({ key: date + "|" + p, who: p, text: i.comment, at: W.ctimes?.[date + "|" + p] || "",
+      canEdit: !S.isGuest && (p === S.me || S.isOwner), save: (text) => api("comment", { weekId: W.week.id, date, comment: text, person: p, edit: true }) })),
+    ...guestList.map((g, i) => [g, i]).filter(([g]) => g.comment).map(([g, i]) => ({ key: date + "|Gast#" + i, who: g.mine ? "Gast (jij)" : "Gast", text: g.comment, at: g.commentAt || g.at || "",
+      canEdit: g.mine || S.isOwner, save: (text) => api("comment", S.isOwner ? { weekId: W.week.id, date, comment: text, person: "Gast", guestIndex: i } : { weekId: W.week.id, date, comment: text, edit: true }) })),
+  ].sort((a, b) => a.at.localeCompare(b.at));
+  if (!notes.length) return null;
+  return el("ul", { class: "notes-list" }, notes.map((n) => {
+    if (!editNote[n.key]) {
+      return el("li", n.canEdit ? { class: "editable", tabindex: "0", role: "button", title: "Tik om aan te passen",
+        onclick: () => { editNote[n.key] = true; render(); }, onkeydown: (ev) => { if (ev.key === "Enter") { editNote[n.key] = true; render(); } } } : {},
+        el("b", {}, n.who), n.text);
+    }
+    const box = el("textarea", { maxlength: "1000", "aria-label": "Reactie van " + n.who }, n.text);
+    const status = el("span", { role: "status" });
+    return el("li", { class: "editing" }, el("b", {}, n.who), box,
+      el("div", { class: "row" },
+        el("button", { class: "btn", onclick: async () => {
+          try {
+            const r = await n.save(box.value);
+            delete editNote[n.key];
+            if (r.guest) W.guest = r.guest;
+            else {
+              const person = n.key.split("|")[1];
+              const f = (W.feedback[person] ??= { person, items: {} });
+              if (r.item) f.items[date] = { ...(f.items[date] ?? { rating: null }), comment: r.item.comment };
+              else if (f.items[date]) { f.items[date].comment = ""; if (f.items[date].rating == null) delete f.items[date]; }
+            }
+            render();
+          } catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
+        el("button", { class: "btn ghost", onclick: () => { delete editNote[n.key]; render(); } }, "Annuleren"),
+        el("span", { class: "hint" }, "Leeg = weghalen"), status));
+  }));
+}
+
+// Ratings save on tap; the number in the scores shows it. Taps are sent one after the other; only the last one counts.
+const pendingRating = {}, sendingRating = {};
+function setRating(W, day, target, rating) {
   errors[day.date] = "";
+  let body;
   if (S.isGuest) {
     const list = (W.guest.items[day.date] ??= []);
     const own = list.find((g) => g.mine);
     if (own) own.rating = rating;
     else { list.push({ rating, comment: "", mine: true }); S.guestLeft = Math.max(0, S.guestLeft - 1); }
+    body = { weekId: W.week.id, date: day.date, rating };
+  } else if (target.startsWith("Gast#")) {
+    const list = (W.guest.items[day.date] ??= []);
+    let i = target.slice(5);
+    if (i === "new") {
+      if (rating === null) return;
+      list.push({ rating, comment: "" });
+      rateFor[day.date] = "Gast#" + (list.length - 1); // next taps change this guest
+      body = { weekId: W.week.id, date: day.date, rating, person: "Gast", guestIndex: null };
+    } else {
+      i = +i;
+      if (rating === null) { list.splice(i, 1); rateFor[day.date] = S.me; } else list[i].rating = rating;
+      body = { weekId: W.week.id, date: day.date, rating, person: "Gast", guestIndex: i };
+    }
   } else {
-    const f = (W.feedback[person] ??= { person, items: {} });
+    const f = (W.feedback[target] ??= { person: target, items: {} });
     const it = f.items[day.date];
     if (rating === null && !it?.comment) delete f.items[day.date];
     else f.items[day.date] = { ...(it ?? { comment: "" }), rating };
+    body = { weekId: W.week.id, date: day.date, person: target, rating };
   }
-  rateState[day.date] = "saving";
   render();
-  const key = W.week.id + day.date + person;
-  pendingRating[key] = { weekId: W.week.id, date: day.date, person, rating };
+  const key = W.week.id + day.date + (target.startsWith("Gast#") ? "Gast" : target);
+  (pendingRating[key] ??= []).push(body); // guests: keep each step (a new guest must exist before it can change)
+  if (!target.startsWith("Gast#")) pendingRating[key] = [body];
   if (!sendingRating[key]) flushRating(W, key);
 }
 async function flushRating(W, key) {
   sendingRating[key] = true;
-  while (pendingRating[key]) {
-    const body = pendingRating[key];
-    delete pendingRating[key];
+  while (pendingRating[key]?.length) {
+    const body = pendingRating[key].shift();
     try {
       const r = await api("rating", body);
-      if (S.isGuest && !pendingRating[key]) { W.guest = r.guest; S.guestLeft = r.guestLeft; }
-      if (!pendingRating[key]) {
-        rateState[body.date] = "saved";
-        render();
-        clearTimeout(rateTimer[body.date]);
-        rateTimer[body.date] = setTimeout(() => { if (rateState[body.date] === "saved") { delete rateState[body.date]; render(); } }, 2500);
-      }
+      if (r.guest && !pendingRating[key].length) { W.guest = r.guest; if (S.isGuest) S.guestLeft = r.guestLeft; render(); }
     } catch (e) {
       errors[body.date] = e.message;
-      delete rateState[body.date];
+      pendingRating[key] = [];
       await load(); // show what is really saved
     }
   }
   sendingRating[key] = false;
 }
 
-/** Your reaction: once per dish. After saving it shows up in the list and the field is gone. */
+/** Your reaction: once per dish. After saving it shows up in the list; tap it there to change it. */
 function renderComment(W, date, eaten, ownGuest) {
   if (S.isGuest) { if (!ownGuest || ownGuest.comment) return null; }
   else if (W.feedback[S.me]?.items?.[date]?.comment) return null;
@@ -395,11 +476,45 @@ function renderComment(W, date, eaten, ownGuest) {
         try {
           const r = await api("comment", { weekId: W.week.id, date, comment: box.value });
           if (S.isGuest) W.guest = r.guest;
-          else { const f = (W.feedback[S.me] ??= { person: S.me, items: {} }); f.items[date] = { ...(f.items[date] ?? { rating: null }), comment: r.item.comment }; }
+          else {
+            const f = (W.feedback[S.me] ??= { person: S.me, items: {} });
+            f.items[date] = { ...(f.items[date] ?? { rating: null }), comment: r.item.comment };
+            (W.ctimes ??= {})[date + "|" + S.me] = r.ctime || new Date().toISOString();
+          }
           delete drafts[key];
           render();
         } catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Opslaan"),
-      el("span", { class: "hint" }, "Je kunt één keer reageren"), status));
+      el("span", { class: "hint" }, "Eén reactie; tik er later op om hem te wijzigen"), status));
+}
+
+// ---------- owner: pick a dish from the overview of all recipes ----------
+let recipes = null, recipesLoading = false;
+async function ensureRecipes() {
+  if (recipes || recipesLoading || !S?.isOwner) return;
+  recipesLoading = true;
+  try { recipes = (await api("recipes")).recipes; } catch (e) { recipes = []; recipesError = e.message; }
+  recipesLoading = false;
+  render();
+}
+let recipesError = "";
+function recipePicker(onPick, placeholder) {
+  ensureRecipes();
+  if (!recipes) return el("p", { class: "muted pick" }, "Gerechten laden…");
+  if (!recipes.length) return recipesError ? el("p", { class: "err pick" }, recipesError) : null;
+  const groups = {};
+  recipes.forEach((r, i) => (groups[r.category || "Overig"] ??= []).push([r, i]));
+  const sel = el("select", { class: "pick", "aria-label": placeholder },
+    el("option", { value: "" }, placeholder),
+    Object.entries(groups).map(([cat, list]) => el("optgroup", { label: cat },
+      list.sort((a, b) => a[0].name.localeCompare(b[0].name, "nl")).map(([r, i]) => el("option", { value: String(i) }, r.name)))));
+  sel.addEventListener("change", () => { if (sel.value !== "") onPick(recipes[+sel.value]); });
+  return sel;
+}
+async function pickRecipe(week, day, r) {
+  try {
+    await api("day", { weekId: week.id, day: { date: day.date, dish: r.name, ingredients: r.ingredients, notes: day.notes, recipeUrl: r.recipeUrl, away: false } });
+    await load();
+  } catch (e) { errors[day.date] = e.message; render(); }
 }
 
 // ---------- standard groceries: planned by Claude, suggestions from the family, approved by the owner ----------
@@ -461,6 +576,12 @@ function renderEdit(week, day) {
   const away = el("input", { type: "checkbox", id: "e-away", checked: !!day.away });
   const status = el("span", { role: "status" });
   const panel = el("div", { class: "panel" },
+    el("label", { class: "f" }, "Ander gerecht kiezen"),
+    recipePicker((r) => {
+      panel.querySelector("#e-dish").value = r.name;
+      panel.querySelector("#e-ingr").value = r.ingredients;
+      panel.querySelector("#e-url").value = r.recipeUrl || "";
+    }, "Kies uit alle gerechten…"),
     f("e-dish", "Gerecht", day.dish), f("e-ingr", "Ingrediënten", day.ingredients, true),
     f("e-notes", "Bijzonderheden", day.notes), f("e-url", "Receptlink", day.recipeUrl),
     el("label", { class: "check" }, away, "Niet thuis eten"),
